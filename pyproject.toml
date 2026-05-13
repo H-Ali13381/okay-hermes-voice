@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "okay-hermes-voice"
+version = "0.1.0"
+description = "Always-on Okay Hermes wakeword voice daemon for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Project contributors" }]
+keywords = ["hermes-agent", "wakeword", "voice", "onnx", "speech", "assistant"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+  "numpy>=1.24",
+  "onnxruntime>=1.17",
+  "PyYAML>=6.0",
+  "sounddevice>=0.4.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/H-Ali13381/okay-hermes-voice"
+Issues = "https://github.com/H-Ali13381/okay-hermes-voice/issues"
+
+[project.scripts]
+okay-hermes-voice = "okay_hermes_voice.wakeword_daemon:main"
+okay-hermes-voice-popup = "okay_hermes_voice.voice_activation_popup:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,19 @@
+[Unit]
+Description=Okay Hermes wakeword activation daemon
+After=pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m okay_hermes_voice.wakeword_daemon --config %h/.hermes/wakeword/config.yaml
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=HERMES_HOME=%h/.hermes
+Environment=HERMES_REPO=%h/.hermes/hermes-agent
+Environment=PYTHONPATH=%h/.hermes/hermes-agent
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=PULSE_SERVER=unix:/run/user/%U/pulse/native
+
+[Install]
+WantedBy=default.target

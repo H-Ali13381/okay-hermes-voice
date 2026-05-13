@@ -1,0 +1,11 @@
+Okay Hermes Voice
+
+This project integrates with Hermes Agent by Nous Research:
+https://github.com/NousResearch/hermes-agent
+
+The default wakeword model path and threshold target H-Ali13381's Okay Hermes
+RepCNN ONNX model repository:
+https://github.com/H-Ali13381/okay-hermes-repcnn-onnx
+
+No wakeword model weights are bundled in this repository. Users should download
+model artifacts from their upstream source and follow the upstream license.

@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+import json
+import sys
+import types
+import wave
+from pathlib import Path
+
+from okay_hermes_voice import wakeword_daemon as wake
+from okay_hermes_voice import voice_activation_popup as popup
+
+import numpy as np
+
+def test_close_transcript_matches_only_explicit_session_close_commands():
+    cfg = {
+        "conversation_close_phrases": [
+            "close",
+            "close voice mode",
+            "close conversation",
+            "stop listening",
+            "end conversation",
+        ]
+    }
+
+    assert wake.is_close_transcript("close", cfg)
+    assert wake.is_close_transcript("Okay Hermes, close voice mode.", cfg)
+    assert wake.is_close_transcript("Hermes stop listening", cfg)
+    assert wake.is_close_transcript("end conversation", cfg)
+
+    assert not wake.is_close_transcript("close the browser", cfg)
+    assert not wake.is_close_transcript("can you close the window after this", cfg)
+    assert not wake.is_close_transcript("what is the closest coffee shop", cfg)
+
+
+def test_command_recording_config_for_followup_disables_start_timeout_without_mutating_original():
+    cfg = {
+        "speech_start_timeout_seconds": 15.0,
+        "conversation_followup_start_timeout_seconds": 0.0,
+    }
+
+    first = wake.command_recording_config_for_turn(cfg, turn_index=1)
+    followup = wake.command_recording_config_for_turn(cfg, turn_index=2)
+
+    assert first["speech_start_timeout_seconds"] == 15.0
+    assert followup["speech_start_timeout_seconds"] == 0.0
+    assert cfg["speech_start_timeout_seconds"] == 15.0
+    assert followup is not cfg
+
+
+def test_configured_hermes_toolsets_preserves_explicit_wakeword_override():
+    assert wake.configured_hermes_toolsets({"hermes_toolsets": ["web"]}) == ["web"]
+
+
+def test_configured_hermes_toolsets_inherits_cli_platform_tools_when_unset(monkeypatch):
+    from hermes_cli import config as hermes_config
+    from hermes_cli import tools_config
+
+    fake_cfg = {"platform_toolsets": {"cli": ["terminal", "file", "skills"]}}
+    monkeypatch.setattr(hermes_config, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(tools_config, "_get_platform_tools", lambda cfg, platform: set(cfg["platform_toolsets"][platform]))
+
+    assert wake.configured_hermes_toolsets({"hermes_toolsets": None}) == ["file", "skills", "terminal"]
+    assert wake.configured_hermes_toolsets({"hermes_toolsets": ""}) == ["file", "skills", "terminal"]
+
+
+def test_warm_hermes_agent_loads_soul_identity_without_project_context(monkeypatch):
+    created_kwargs = {}
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):
+            created_kwargs.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        types.SimpleNamespace(
+            resolve_runtime_provider=lambda requested=None, target_model=None: {
+                "provider": "openai-codex",
+                "api_key": "token",
+                "base_url": "https://example.invalid",
+                "api_mode": "codex_responses",
+                "credential_pool": None,
+            }
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.oneshot",
+        types.SimpleNamespace(
+            _create_session_db_for_oneshot=lambda: object(),
+            _oneshot_clarify_callback=lambda *_args, **_kwargs: "pick a default",
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "run_agent", types.SimpleNamespace(AIAgent=FakeAIAgent))
+    wake._HERMES_AGENT_CACHE.clear()
+
+    wake.get_warm_hermes_agent(
+        {"hermes_max_iterations": 90, "hermes_load_soul_identity": True},
+        provider=None,
+        model="gpt-5.5",
+        toolsets=["skills"],
+    )
+
+    assert created_kwargs["skip_context_files"] is True
+    assert created_kwargs["load_soul_identity"] is True
+    assert created_kwargs["max_iterations"] == 90
+    wake._HERMES_AGENT_CACHE.clear()
+
+
+def test_ask_hermes_turn_preserves_voice_conversation_history(monkeypatch):
+    calls = {}
+
+    class FakeAgent:
+        def run_conversation(self, prompt, conversation_history=None, persist_user_message=None):
+            calls["prompt"] = prompt
+            calls["conversation_history"] = list(conversation_history or [])
+            calls["persist_user_message"] = persist_user_message
+            return {
+                "final_response": "second answer",
+                "messages": [
+                    *(conversation_history or []),
+                    {"role": "user", "content": persist_user_message},
+                    {"role": "assistant", "content": "second answer"},
+                ],
+            }
+
+    monkeypatch.setattr(wake, "configured_hermes_runtime_selection", lambda cfg: (None, "gpt-5.5"))
+    monkeypatch.setattr(wake, "configured_hermes_toolsets", lambda cfg: ["skills"])
+    monkeypatch.setattr(wake, "get_warm_hermes_agent", lambda cfg, provider, model, toolsets: FakeAgent())
+
+    previous_history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    response, updated_history = wake.ask_hermes_turn(
+        {
+            "hermes_inprocess": True,
+            "hermes_warm_agent": True,
+            "hermes_prompt_prefix": "VOICE PREFIX",
+        },
+        "follow-up question",
+        previous_history,
+    )
+
+    assert response == "second answer"
+    assert calls["prompt"] == "VOICE PREFIX\n\nTranscript:\nfollow-up question"
+    assert calls["conversation_history"] == previous_history
+    assert calls["persist_user_message"] == "follow-up question"
+    assert updated_history[-2:] == [
+        {"role": "user", "content": "follow-up question"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+
+
+def test_append_visualization_turn_preserves_conversation_history(tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    wake.update_visualization_state(
+        state_path,
+        status="thinking",
+        message="first turn",
+        transcript="",
+        response="",
+        turns=[],
+    )
+
+    wake.append_visualization_turn(state_path, transcript="First request", response="First response")
+    wake.append_visualization_turn(state_path, transcript="Second request", response="Second response")
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["transcript"] == "Second request"
+    assert state["response"] == "Second response"
+    assert [turn["transcript"] for turn in state["turns"]] == ["First request", "Second request"]
+    assert [turn["response"] for turn in state["turns"]] == ["First response", "Second response"]
+
+
+def test_popup_render_shows_multiple_conversation_turns():
+    rendered = popup.render(
+        {
+            "title": "Hermes Voice",
+            "status": "listening",
+            "message": "Listening for follow-up",
+            "activated_at": 1,
+            "updated_at": 2,
+            "turns": [
+                {"transcript": "First request", "response": "First response"},
+                {"transcript": "Second request", "response": "Second response"},
+            ],
+        },
+        tick=0,
+        final_seen_at=None,
+    )
+
+    assert "Conversation" in rendered
+    assert "You: First request" in rendered
+    assert "Hermes: First response" in rendered
+    assert "You: Second request" in rendered
+    assert "Hermes: Second response" in rendered
+
+
+def test_popup_ctrl_c_request_marks_state_for_daemon_cancel(tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    state_path.write_text(json.dumps({"status": "listening", "message": "Listening"}), encoding="utf-8")
+
+    popup.request_cancel(state_path, reason="ctrl_c")
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["cancel_requested"] is True
+    assert state["cancel_reason"] == "ctrl_c"
+    assert state["status"] == "cancel_requested"
+    assert "cancel_requested_at" in state
+
+
+def test_daemon_detects_visualization_cancel_request(tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    wake.update_visualization_state(state_path, status="listening")
+
+    assert not wake.is_visualization_cancel_requested(state_path)
+
+    popup.request_cancel(state_path, reason="ctrl_c")
+
+    assert wake.is_visualization_cancel_requested(state_path)
+
+
+def test_record_command_returns_none_without_opening_stream_when_cancelled(monkeypatch):
+    def fail_if_opened(*_args, **_kwargs):
+        raise AssertionError("InputStream should not open after cancellation")
+
+    cfg = dict(wake.DEFAULT_CONFIG)
+    cfg.update({"speech_start_timeout_seconds": 1.0, "block_seconds": 0.1})
+    monkeypatch.setattr(wake.sd, "InputStream", fail_if_opened)
+
+    assert wake.record_command(cfg, cancel_check=lambda: True) is None
+
+
+def test_save_activation_archive_writes_wake_clip_and_metadata(tmp_path):
+    cfg = {
+        "activation_archive_dir": str(tmp_path / "activations"),
+        "sample_rate": 16000,
+        "window_seconds": 3.0,
+        "threshold": 0.4112943708896637,
+        "model_path": "/models/okay-hermes.onnx",
+    }
+    waveform = np.linspace(-0.5, 0.5, 16000, dtype=np.float32)
+    activation = {
+        "probability": 0.92,
+        "scores": [0.88, 0.92],
+        "waveform": waveform,
+        "sample_rate": 16000,
+        "detected_at": 1234.5,
+    }
+
+    archive = wake.save_activation_archive(cfg, activation)
+
+    assert archive is not None
+    wav_path = Path(archive["wake_wav_path"])
+    meta_path = Path(archive["metadata_path"])
+    assert wav_path.parent == tmp_path / "activations"
+    assert wav_path.exists()
+    assert meta_path.exists()
+    with wave.open(str(wav_path), "rb") as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getframerate() == 16000
+        assert wf.getnframes() == 16000
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert metadata["probability"] == 0.92
+    assert metadata["scores"] == [0.88, 0.92]
+    assert metadata["sample_rate"] == 16000
+    assert metadata["status"] == "wake_detected"
+    assert metadata["model_path"] == "/models/okay-hermes.onnx"
+
+
+def test_update_activation_archive_metadata_merges_turn_details(tmp_path):
+    meta_path = tmp_path / "activation.json"
+    meta_path.write_text(json.dumps({"status": "wake_detected", "turns": []}), encoding="utf-8")
+    archive = {"metadata_path": str(meta_path)}
+
+    wake.update_activation_archive_metadata(
+        archive,
+        status="completed",
+        turns=[{"turn": 1, "transcript": "hello", "response": "hi"}],
+        close_reason="close_phrase",
+    )
+
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "completed"
+    assert metadata["turns"] == [{"turn": 1, "transcript": "hello", "response": "hi"}]
+    assert metadata["close_reason"] == "close_phrase"
