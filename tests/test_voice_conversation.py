@@ -6,10 +6,151 @@ import types
 import wave
 from pathlib import Path
 
+from okay_hermes_voice import interaction_router as router
 from okay_hermes_voice import wakeword_daemon as wake
 from okay_hermes_voice import voice_activation_popup as popup
 
 import numpy as np
+
+def test_interaction_router_config_from_daemon_config_maps_prefixed_keys():
+    cfg = dict(wake.DEFAULT_CONFIG)
+    cfg.update(
+        {
+            "interaction_router_enabled": True,
+            "interaction_router_provider": "deepseek",
+            "interaction_router_model": "deepseek/deepseek-v4-flash",
+            "interaction_router_timeout_seconds": 2.25,
+            "interaction_router_min_confidence": 0.8,
+            "interaction_router_small_model_enabled": True,
+            "interaction_router_ack_cache_enabled": False,
+            "interaction_router_ack_cache_dir": "~/tmp/acks",
+        }
+    )
+
+    router_cfg = wake.interaction_router_config_from_daemon_config(cfg)
+
+    assert router_cfg.router_enabled is True
+    assert router_cfg.router_provider == "deepseek"
+    assert router_cfg.router_model == "deepseek/deepseek-v4-flash"
+    assert router_cfg.router_timeout_seconds == 2.25
+    assert router_cfg.router_min_confidence == 0.8
+    assert router_cfg.small_model_enabled is True
+    assert router_cfg.ack_cache_enabled is False
+    assert router_cfg.ack_cache_dir == "~/tmp/acks"
+
+
+def test_plan_interaction_route_returns_none_when_disabled(monkeypatch):
+    called = False
+
+    def fake_plan_voice_request(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(wake, "plan_voice_request", fake_plan_voice_request)
+
+    assert wake.plan_interaction_route({"interaction_router_enabled": False}, "hello") is None
+    assert called is False
+
+
+def test_play_interaction_ack_uses_ack_cache(monkeypatch, tmp_path):
+    played = []
+
+    class FakeAckCache:
+        def __init__(self, cache_dir, *, tts_generator, audio_player):
+            self.cache_dir = cache_dir
+            self.tts_generator = tts_generator
+            self.audio_player = audio_player
+
+        def play(self, template_id):
+            played.append((self.cache_dir, template_id))
+            return True
+
+    monkeypatch.setattr(wake, "AcknowledgementCache", FakeAckCache)
+
+    cfg = {
+        "interaction_router_ack_cache_dir": str(tmp_path),
+        "interaction_router_ack_cache_enabled": True,
+    }
+
+    assert wake.play_interaction_ack(cfg, wake.AckTemplate.CHECKING) is True
+    assert played == [(tmp_path, wake.AckTemplate.CHECKING)]
+
+
+def test_route_transcribed_request_plays_immediate_ack(monkeypatch):
+    decision = router.RouterDecision(confidence=0.9)
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.CHECKING,
+        "router_heavy_agent",
+    )
+    plan = wake.VoiceRequestPlan("inspect the repo", decision, route)
+    played = []
+
+    monkeypatch.setattr(wake, "plan_interaction_route", lambda cfg, transcript: plan)
+    monkeypatch.setattr(wake, "play_interaction_ack", lambda cfg, template: played.append(template) or True)
+
+    assert wake.route_transcribed_request({}, "inspect the repo") is plan
+    assert played == [wake.AckTemplate.CHECKING]
+
+
+def test_route_transcribed_request_skips_none_ack(monkeypatch):
+    decision = router.RouterDecision(confidence=0.9)
+    route = router.VoiceRoute(
+        wake.RouteTarget.IMMEDIATE_ONLY,
+        wake.AckTemplate.NONE,
+        "router_immediate_only",
+    )
+    plan = wake.VoiceRequestPlan("close", decision, route)
+
+    monkeypatch.setattr(wake, "plan_interaction_route", lambda cfg, transcript: plan)
+    monkeypatch.setattr(
+        wake,
+        "play_interaction_ack",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ack should not play")),
+    )
+
+    assert wake.route_transcribed_request({}, "close") is plan
+
+
+def test_answer_routed_request_uses_small_model_and_updates_history(monkeypatch):
+    route = router.VoiceRoute(
+        wake.RouteTarget.SMALL_MODEL,
+        wake.AckTemplate.NONE,
+        "router_small_model",
+    )
+    plan = wake.VoiceRequestPlan("tell me a tiny fact", router.RouterDecision(confidence=0.95), route)
+    monkeypatch.setattr(wake, "answer_with_small_model", lambda transcript, cfg: "Tiny answer.")
+    monkeypatch.setattr(
+        wake,
+        "ask_hermes_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("heavy agent should not run")),
+    )
+
+    response, history, source = wake.answer_routed_request({}, "tell me a tiny fact", plan, [])
+
+    assert response == "Tiny answer."
+    assert source == "small_model"
+    assert history[-2:] == [
+        {"role": "user", "content": "tell me a tiny fact"},
+        {"role": "assistant", "content": "Tiny answer."},
+    ]
+
+
+def test_answer_routed_request_falls_back_to_heavy_agent(monkeypatch):
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.CHECKING,
+        "router_heavy_agent",
+    )
+    plan = wake.VoiceRequestPlan("inspect the repo", router.RouterDecision(confidence=0.95), route)
+    monkeypatch.setattr(wake, "ask_hermes_turn", lambda cfg, transcript, history: ("Heavy answer.", [*history, {"role": "assistant", "content": "Heavy answer."}]))
+
+    response, history, source = wake.answer_routed_request({}, "inspect the repo", plan, [])
+
+    assert response == "Heavy answer."
+    assert source == "heavy_agent"
+    assert history == [{"role": "assistant", "content": "Heavy answer."}]
+
 
 def test_close_transcript_matches_only_explicit_session_close_commands():
     cfg = {

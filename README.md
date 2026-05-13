@@ -343,6 +343,11 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `hermes_warm_agent`: keep the agent initialized between turns.
 - `hermes_max_iterations`: maximum Hermes tool/reasoning loop iterations.
 - `hermes_load_soul_identity`: load the normal Hermes identity/persona file.
+- `interaction_router_enabled`: classify transcripts after STT and before the full agent.
+- `interaction_router_model`: fast structured router model, defaulting to Gemini Flash Lite.
+- `interaction_router_min_confidence`: below this, route conservatively to the full Hermes agent.
+- `interaction_router_small_model_enabled`: allow simple/safe requests to bypass the full agent.
+- `interaction_router_ack_cache_enabled`: cache short acknowledgement clips like “Got it.”
 - `playback_sink`: `@DEFAULT_SINK@`, `all`, or a specific Pulse/PipeWire sink name.
 - `visualization_enabled`: open the optional popup window.
 - `conversation_mode_enabled`: keep listening after the first answer.

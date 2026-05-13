@@ -37,6 +37,21 @@ hermes_prompt_prefix: >-
   mention uncertainty when it matters. Keep spoken answers concise unless the
   task requires depth.
 
+# Low-latency interaction router. The router runs after STT and before the full
+# Hermes agent. It can play a cached acknowledgement immediately, route safe
+# simple requests to a small model when enabled, and falls back conservatively to
+# the warm Hermes agent for tools, memory, external data, or uncertainty.
+interaction_router_enabled: true
+interaction_router_provider: openrouter
+interaction_router_model: google/gemini-2.5-flash-lite
+interaction_router_timeout_seconds: 1.5
+interaction_router_min_confidence: 0.70
+interaction_router_small_model_enabled: false
+interaction_router_small_model_provider: openrouter
+interaction_router_small_model_model: google/gemini-2.5-flash-lite
+interaction_router_ack_cache_enabled: true
+interaction_router_ack_cache_dir: ~/.hermes/wakeword/ack_cache
+
 tts_enabled: true
 max_spoken_response_chars: 2500
 playback_sink: '@DEFAULT_SINK@'   # use 'all' to fan out to every Pulse/PipeWire sink

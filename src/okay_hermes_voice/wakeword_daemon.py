@@ -38,13 +38,23 @@ HERMES_REPO = Path(os.environ.get("HERMES_REPO", str(HERMES_HOME / "hermes-agent
 if str(HERMES_REPO) not in sys.path:
     sys.path.insert(0, str(HERMES_REPO))
 
-import numpy as np
-import onnxruntime as ort
-import sounddevice as sd
-import yaml
+import numpy as np  # noqa: E402
+import onnxruntime as ort  # noqa: E402
+import sounddevice as sd  # noqa: E402
+import yaml  # noqa: E402
 
-from tools.tts_tool import text_to_speech_tool
-from tools.voice_mode import is_whisper_hallucination, play_audio_file, play_beep, transcribe_recording
+from tools.tts_tool import text_to_speech_tool  # noqa: E402
+from tools.voice_mode import is_whisper_hallucination, play_audio_file, play_beep, transcribe_recording  # noqa: E402
+
+from .interaction_router import (  # noqa: E402
+    AckTemplate,
+    AcknowledgementCache,
+    InteractionRouterConfig,
+    RouteTarget,
+    VoiceRequestPlan,
+    answer_with_small_model,
+    plan_voice_request,
+)
 
 CONFIG_PATH = HERMES_HOME / "wakeword" / "config.yaml"
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -84,6 +94,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "Do not treat voice mode as a weaker assistant. The transcript may contain speech-to-text errors; infer the likely intent when obvious, "
         "and mention uncertainty when it matters. Keep spoken answers concise unless the task requires depth."
     ),
+    "interaction_router_enabled": True,
+    "interaction_router_provider": "openrouter",
+    "interaction_router_model": "google/gemini-2.5-flash-lite",
+    "interaction_router_timeout_seconds": 1.5,
+    "interaction_router_min_confidence": 0.70,
+    "interaction_router_small_model_enabled": False,
+    "interaction_router_small_model_provider": "openrouter",
+    "interaction_router_small_model_model": "google/gemini-2.5-flash-lite",
+    "interaction_router_ack_cache_enabled": True,
+    "interaction_router_ack_cache_dir": str(HERMES_HOME / "wakeword" / "ack_cache"),
     "tts_enabled": True,
     "max_spoken_response_chars": 2500,
     "playback_sink": "@DEFAULT_SINK@",
@@ -858,6 +878,114 @@ def play_tts_file(cfg: Dict[str, Any], file_path: str) -> bool:
     return bool(play_audio_file(str(file_path)))
 
 
+def interaction_router_config_from_daemon_config(cfg: Dict[str, Any]) -> InteractionRouterConfig:
+    """Translate daemon config keys into the standalone router config."""
+    return InteractionRouterConfig.from_mapping({
+        "router_enabled": cfg.get("interaction_router_enabled", True),
+        "router_provider": cfg.get("interaction_router_provider", "openrouter"),
+        "router_model": cfg.get("interaction_router_model", "google/gemini-2.5-flash-lite"),
+        "router_timeout_seconds": cfg.get("interaction_router_timeout_seconds", 1.5),
+        "router_min_confidence": cfg.get("interaction_router_min_confidence", 0.70),
+        "small_model_enabled": cfg.get("interaction_router_small_model_enabled", False),
+        "small_model_provider": cfg.get("interaction_router_small_model_provider", "openrouter"),
+        "small_model_model": cfg.get("interaction_router_small_model_model", "google/gemini-2.5-flash-lite"),
+        "ack_cache_enabled": cfg.get("interaction_router_ack_cache_enabled", True),
+        "ack_cache_dir": cfg.get("interaction_router_ack_cache_dir", str(HERMES_HOME / "wakeword" / "ack_cache")),
+    })
+
+
+def plan_interaction_route(cfg: Dict[str, Any], transcript: str) -> Optional[VoiceRequestPlan]:
+    """Classify a transcript and choose the deterministic voice route."""
+    router_cfg = interaction_router_config_from_daemon_config(cfg)
+    if not router_cfg.router_enabled:
+        return None
+    started = time.monotonic()
+    plan = plan_voice_request(transcript, router_cfg)
+    LOG.info(
+        "Interaction router target=%s ack=%s reason=%s confidence=%.2f latency=%.3fs router_reason=%s",
+        plan.route.target.value,
+        plan.route.ack_template_id.value,
+        plan.route.reason,
+        plan.decision.confidence,
+        time.monotonic() - started,
+        plan.decision.brief_reason,
+    )
+    return plan
+
+
+def _generate_ack_tts(text: str, out_path: Path) -> Path:
+    """Generate one acknowledgement clip and copy it into the ack cache."""
+    result_raw = text_to_speech_tool(text)
+    try:
+        result = json.loads(result_raw)
+    except Exception as exc:
+        raise RuntimeError(f"TTS returned non-JSON for acknowledgement: {result_raw!r}") from exc
+    if not result.get("success") or not result.get("file_path"):
+        raise RuntimeError(f"TTS failed for acknowledgement: {result}")
+    source = Path(str(result["file_path"])).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != out_path.resolve():
+        shutil.copyfile(source, out_path)
+    return out_path
+
+
+def play_interaction_ack(cfg: Dict[str, Any], template_id: AckTemplate) -> bool:
+    """Play a short receipt-only acknowledgement before longer work starts."""
+    if template_id is AckTemplate.NONE or not cfg.get("tts_enabled", True):
+        return False
+    router_cfg = interaction_router_config_from_daemon_config(cfg)
+    if not router_cfg.ack_cache_enabled:
+        from .interaction_router import ACK_TEXT
+        speak_response(cfg, ACK_TEXT[template_id])
+        return True
+    cache = AcknowledgementCache(
+        router_cfg.ack_cache_path,
+        tts_generator=_generate_ack_tts,
+        audio_player=lambda path: play_tts_file(cfg, str(path)),
+    )
+    try:
+        return cache.play(template_id)
+    except Exception as exc:
+        LOG.warning("Could not play cached interaction acknowledgement: %s", exc)
+        return False
+
+
+def route_transcribed_request(cfg: Dict[str, Any], transcript: str) -> Optional[VoiceRequestPlan]:
+    """Plan routing for a final STT transcript and play any immediate acknowledgement."""
+    plan = plan_interaction_route(cfg, transcript)
+    if plan is None:
+        return None
+    if plan.route.ack_template_id is not AckTemplate.NONE:
+        play_interaction_ack(cfg, plan.route.ack_template_id)
+    return plan
+
+
+def answer_routed_request(
+    cfg: Dict[str, Any],
+    transcript: str,
+    plan: Optional[VoiceRequestPlan],
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[Optional[str], List[Dict[str, Any]], str]:
+    """Execute the selected route, falling back to heavy Hermes when needed."""
+    history = list(conversation_history or [])
+    if plan and plan.route.target is RouteTarget.SAFETY_FLOW:
+        return "I can’t help with that request.", history, "safety_flow"
+    if plan and plan.route.target is RouteTarget.ASK_CLARIFICATION:
+        return "Could you clarify what you want me to do?", history, "ask_clarification"
+    if plan and plan.route.target is RouteTarget.SMALL_MODEL:
+        router_cfg = interaction_router_config_from_daemon_config(cfg)
+        response = answer_with_small_model(transcript, router_cfg)
+        if response:
+            history.extend([
+                {"role": "user", "content": transcript},
+                {"role": "assistant", "content": response},
+            ])
+            return response, history, "small_model"
+        LOG.info("Small-model route produced no response; falling back to heavy Hermes")
+    response, history = ask_hermes_turn(cfg, transcript, history)
+    return response, history, "heavy_agent"
+
+
 def speak_response(cfg: Dict[str, Any], text: str) -> None:
     if not cfg.get("tts_enabled", True):
         LOG.info("TTS disabled; response not spoken")
@@ -1285,25 +1413,42 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             LOG.info("Voice conversation closed by transcript: %r", transcript)
             return
 
+        interaction_plan = route_transcribed_request(cfg, transcript)
+        if stop_if_cancelled():
+            return
+        route_target = interaction_plan.route.target.value if interaction_plan else "heavy_agent"
+
         update_visualization_state(
             visual_state,
             status="thinking",
-            message="Request transcribed. Hermes is handling it now…",
+            message=f"Request routed to {route_target.replace('_', ' ')}. Handling it now…",
             transcript=transcript,
             response="",
             error="",
             current_turn=turn_index,
         )
+        router_metadata: Dict[str, Any] = {}
+        if interaction_plan:
+            router_metadata = {
+                "interaction_route_target": interaction_plan.route.target.value,
+                "interaction_route_reason": interaction_plan.route.reason,
+                "interaction_ack_template": interaction_plan.route.ack_template_id.value,
+                "interaction_router_confidence": interaction_plan.decision.confidence,
+                "interaction_router_reason": interaction_plan.decision.brief_reason,
+            }
         update_activation_archive_metadata(
             activation_archive,
             status="thinking",
             current_turn=turn_index,
             latest_transcript=transcript,
+            **router_metadata,
             **command_audio_metadata_fields(archived_command_path, command_path, latest=True),
         )
         if stop_if_cancelled():
             return
-        response, hermes_history = ask_hermes_turn(cfg, transcript, hermes_history)
+        response, hermes_history, response_source = answer_routed_request(
+            cfg, transcript, interaction_plan, hermes_history
+        )
         if stop_if_cancelled():
             return
         if response:
@@ -1311,6 +1456,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                 "turn": turn_index,
                 "transcript": transcript,
                 "response": response,
+                "response_source": response_source,
                 **command_audio_metadata_fields(archived_command_path, command_path),
             })
             update_activation_archive_metadata(
@@ -1318,6 +1464,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                 status="speaking",
                 latest_transcript=transcript,
                 latest_response=response,
+                latest_response_source=response_source,
                 turns=archive_turns,
             )
             append_visualization_turn(visual_state, transcript=transcript, response=response)
