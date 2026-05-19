@@ -25,6 +25,8 @@ hermes_model: ''
 hermes_toolsets: null
 hermes_warm_agent: true
 hermes_max_iterations: 90
+hermes_cancel_poll_seconds: 0.1
+hermes_interrupt_wait_seconds: 5.0
 hermes_load_soul_identity: true
 prewarm_hermes_on_start: true
 

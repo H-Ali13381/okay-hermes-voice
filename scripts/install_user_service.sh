@@ -13,7 +13,15 @@ if [[ ! -x "$python_bin" ]]; then
 fi
 
 mkdir -p "$hermes_home/wakeword" "$hermes_home/logs" "$HOME/.config/systemd/user"
-"$python_bin" -m pip install -e "$repo_dir"
+if "$python_bin" -m pip --version >/dev/null 2>&1; then
+  "$python_bin" -m pip install -e "$repo_dir"
+elif command -v uv >/dev/null 2>&1; then
+  uv pip install --python "$python_bin" -e "$repo_dir"
+else
+  echo "Neither pip in $python_bin nor uv is available for package installation." >&2
+  echo "Install pip in the Hermes venv or install uv, then rerun this script." >&2
+  exit 1
+fi
 
 if [[ ! -f "$hermes_home/wakeword/config.yaml" ]]; then
   cp "$repo_dir/config.example.yaml" "$hermes_home/wakeword/config.yaml"

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
+import threading
+import time
 import types
 import wave
 from pathlib import Path
@@ -76,6 +79,22 @@ def test_play_interaction_ack_uses_ack_cache(monkeypatch, tmp_path):
     assert played == [(tmp_path, wake.AckTemplate.CHECKING)]
 
 
+def test_generate_ack_tts_preserves_tts_provider_suffix(monkeypatch, tmp_path):
+    source = tmp_path / "source.ogg"
+    source.write_bytes(b"OggS\x00provider audio")
+
+    monkeypatch.setattr(
+        wake,
+        "text_to_speech_tool",
+        lambda text: json.dumps({"success": True, "file_path": str(source)}),
+    )
+
+    target = wake._generate_ack_tts("Okay, I’m on it.", tmp_path / "got_it.wav")
+
+    assert target == tmp_path / "got_it.ogg"
+    assert target.read_bytes() == source.read_bytes()
+
+
 def test_route_transcribed_request_plays_immediate_ack(monkeypatch):
     decision = router.RouterDecision(confidence=0.9)
     route = router.VoiceRoute(
@@ -87,10 +106,59 @@ def test_route_transcribed_request_plays_immediate_ack(monkeypatch):
     played = []
 
     monkeypatch.setattr(wake, "plan_interaction_route", lambda cfg, transcript: plan)
-    monkeypatch.setattr(wake, "play_interaction_ack", lambda cfg, template: played.append(template) or True)
+    monkeypatch.setattr(
+        wake,
+        "play_interaction_ack",
+        lambda cfg, template, **kwargs: played.append((template, kwargs.get("block"))) or True,
+    )
 
     assert wake.route_transcribed_request({}, "inspect the repo") is plan
-    assert played == [wake.AckTemplate.CHECKING]
+    assert played == [(wake.AckTemplate.CHECKING, False)]
+
+
+def test_route_transcribed_request_schedules_heavy_ack_without_blocking(monkeypatch, tmp_path):
+    decision = router.RouterDecision(confidence=0.9)
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.CHECKING,
+        "router_heavy_agent",
+    )
+    plan = wake.VoiceRequestPlan("inspect the repo", decision, route)
+    ack_started = threading.Event()
+    ack_can_finish = threading.Event()
+    ack_finished = threading.Event()
+
+    class SlowAckCache:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def play(self, template_id):
+            assert template_id is wake.AckTemplate.CHECKING
+            ack_started.set()
+            ack_can_finish.wait(timeout=1.0)
+            ack_finished.set()
+            return True
+
+    monkeypatch.setattr(wake, "plan_interaction_route", lambda cfg, transcript: plan)
+    monkeypatch.setattr(wake, "AcknowledgementCache", SlowAckCache)
+
+    started = time.monotonic()
+    result = wake.route_transcribed_request(
+        {
+            "interaction_router_ack_cache_dir": str(tmp_path),
+            "interaction_router_ack_cache_enabled": True,
+        },
+        "inspect the repo",
+    )
+    elapsed = time.monotonic() - started
+
+    try:
+        assert result is plan
+        assert elapsed < 0.2
+        assert ack_started.wait(timeout=0.2)
+    finally:
+        ack_can_finish.set()
+        ack_finished.wait(timeout=1.0)
 
 
 def test_route_transcribed_request_skips_none_ack(monkeypatch):
@@ -110,6 +178,51 @@ def test_route_transcribed_request_skips_none_ack(monkeypatch):
     )
 
     assert wake.route_transcribed_request({}, "close") is plan
+
+
+def test_handle_activation_surfaces_routing_ack_text_in_popup(monkeypatch, tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+    decision = router.RouterDecision(confidence=0.0)
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.GOT_IT,
+        "low_router_confidence",
+    )
+    plan = wake.VoiceRequestPlan("what is the weather", decision, route)
+
+    def fake_launch_visualization(_cfg, probability):
+        wake.update_visualization_state(
+            state_path,
+            status="listening",
+            probability=probability,
+            cancel_requested=False,
+            cancel_reason="",
+        )
+        return state_path
+
+    def fake_answer_routed_request(_cfg, transcript, routed_plan, history, *, cancel_check):
+        assert transcript == "what is the weather"
+        assert routed_plan is plan
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["interaction_ack_text"] == "Okay, I’m on it."
+        assert "Okay, I’m on it." in state["message"]
+        assert "heavy agent" in state["message"]
+        return "spoken answer", history, "heavy_agent"
+
+    wake.STOP.clear()
+    monkeypatch.setattr(wake, "save_activation_archive", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "launch_visualization", fake_launch_visualization)
+    monkeypatch.setattr(wake, "maybe_beep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "record_command", lambda *_args, **_kwargs: command_path)
+    monkeypatch.setattr(wake, "archive_command_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "transcribe_command", lambda *_args, **_kwargs: "what is the weather")
+    monkeypatch.setattr(wake, "route_transcribed_request", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(wake, "answer_routed_request", fake_answer_routed_request)
+    monkeypatch.setattr(wake, "speak_response", lambda *_args, **_kwargs: None)
+
+    wake.handle_activation({"conversation_mode_enabled": False}, {"probability": 0.9})
 
 
 def test_answer_routed_request_uses_small_model_and_updates_history(monkeypatch):
@@ -143,7 +256,7 @@ def test_answer_routed_request_falls_back_to_heavy_agent(monkeypatch):
         "router_heavy_agent",
     )
     plan = wake.VoiceRequestPlan("inspect the repo", router.RouterDecision(confidence=0.95), route)
-    monkeypatch.setattr(wake, "ask_hermes_turn", lambda cfg, transcript, history: ("Heavy answer.", [*history, {"role": "assistant", "content": "Heavy answer."}]))
+    monkeypatch.setattr(wake, "ask_hermes_turn", lambda cfg, transcript, history, **_kwargs: ("Heavy answer.", [*history, {"role": "assistant", "content": "Heavy answer."}]))
 
     response, history, source = wake.answer_routed_request({}, "inspect the repo", plan, [])
 
@@ -293,6 +406,103 @@ def test_ask_hermes_turn_preserves_voice_conversation_history(monkeypatch):
     ]
 
 
+def test_ask_hermes_turn_interrupts_warm_agent_when_cancel_requested(monkeypatch):
+    class FakeAgent:
+        def __init__(self):
+            self.interrupted = False
+            self.interrupt_message = None
+
+        def run_conversation(self, prompt, conversation_history=None, persist_user_message=None):
+            deadline = time.monotonic() + 0.25
+            while time.monotonic() < deadline and not self.interrupted:
+                time.sleep(0.01)
+            return {
+                "final_response": "late answer",
+                "messages": list(conversation_history or []),
+                "interrupted": self.interrupted,
+            }
+
+        def interrupt(self, message=None):
+            self.interrupted = True
+            self.interrupt_message = message
+
+    fake_agent = FakeAgent()
+    monkeypatch.setattr(wake, "configured_hermes_runtime_selection", lambda cfg: (None, "gpt-5.5"))
+    monkeypatch.setattr(wake, "configured_hermes_toolsets", lambda cfg: ["skills"])
+    monkeypatch.setattr(wake, "get_warm_hermes_agent", lambda cfg, provider, model, toolsets: fake_agent)
+
+    response, history = wake.ask_hermes_turn(
+        {
+            "hermes_inprocess": True,
+            "hermes_warm_agent": True,
+            "hermes_cancel_poll_seconds": 0.01,
+            "hermes_interrupt_wait_seconds": 1.0,
+        },
+        "please do a long task",
+        [{"role": "user", "content": "before"}],
+        cancel_check=lambda: True,
+    )
+
+    assert response is None
+    assert history == [{"role": "user", "content": "before"}]
+    assert fake_agent.interrupted is True
+    assert fake_agent.interrupt_message == "Voice session cancelled"
+
+
+def test_ask_hermes_turn_kills_subprocess_group_when_cancel_requested(monkeypatch):
+    popen_kwargs = {}
+    killpg_calls = []
+
+    class FakeProc:
+        pid = 43210
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = -signal.SIGTERM
+            return self.returncode
+
+        def communicate(self):
+            return "partial stdout", "partial stderr"
+
+    fake_proc = FakeProc()
+
+    def fake_popen(*args, **kwargs):
+        popen_kwargs.update(kwargs)
+        return fake_proc
+
+    monkeypatch.setattr(wake, "configured_hermes_runtime_selection", lambda cfg: (None, None))
+    monkeypatch.setattr(wake, "configured_hermes_toolsets", lambda cfg: None)
+    monkeypatch.setattr(wake.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        wake.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Hermes subprocess must be cancellable Popen, not run")),
+    )
+    monkeypatch.setattr(wake.os, "killpg", lambda pid, sig: killpg_calls.append((pid, sig)))
+
+    response, history = wake.ask_hermes_turn(
+        {
+            "hermes_inprocess": False,
+            "hermes_bin": "hermes",
+            "hermes_source": "wakeword",
+            "hermes_timeout_seconds": 30,
+            "hermes_cancel_poll_seconds": 0.01,
+            "hermes_interrupt_wait_seconds": 1.0,
+        },
+        "run a long shell command",
+        [],
+        cancel_check=lambda: True,
+    )
+
+    assert response is None
+    assert history == []
+    assert popen_kwargs["start_new_session"] is True
+    assert killpg_calls == [(fake_proc.pid, signal.SIGTERM)]
+
+
 def test_append_visualization_turn_preserves_conversation_history(tmp_path):
     state_path = tmp_path / "voice_state.json"
     wake.update_visualization_state(
@@ -371,6 +581,133 @@ def test_record_command_returns_none_without_opening_stream_when_cancelled(monke
     monkeypatch.setattr(wake.sd, "InputStream", fail_if_opened)
 
     assert wake.record_command(cfg, cancel_check=lambda: True) is None
+
+
+def test_play_tts_file_terminates_player_when_cancel_requested(monkeypatch):
+    fake_proc = types.SimpleNamespace(
+        returncode=None,
+        terminated=False,
+        killed=False,
+        stderr="",
+        stdout="",
+    )
+
+    def poll():
+        return fake_proc.returncode
+
+    def terminate():
+        fake_proc.terminated = True
+        fake_proc.returncode = -15
+
+    def kill():
+        fake_proc.killed = True
+        fake_proc.returncode = -9
+
+    def wait(timeout=None):
+        return fake_proc.returncode
+
+    fake_proc.poll = poll
+    fake_proc.terminate = terminate
+    fake_proc.kill = kill
+    fake_proc.wait = wait
+
+    monkeypatch.setattr(wake.subprocess, "Popen", lambda *_args, **_kwargs: fake_proc)
+    monkeypatch.setattr(
+        wake.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("playback should use cancellable Popen")),
+    )
+    monkeypatch.setattr(wake.time, "sleep", lambda *_args, **_kwargs: None)
+
+    cancel_checks = iter([False, False, True])
+
+    ok = wake.play_tts_file(
+        {"playback_sink": "@DEFAULT_SINK@", "playback_volume": 1.0},
+        "/tmp/response.wav",
+        cancel_check=lambda: next(cancel_checks, True),
+    )
+
+    assert ok is False
+    assert fake_proc.terminated is True
+
+
+def test_handle_activation_passes_popup_cancel_check_to_response_playback(monkeypatch, tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+
+    def fake_launch_visualization(_cfg, probability):
+        wake.update_visualization_state(
+            state_path,
+            status="listening",
+            probability=probability,
+            cancel_requested=False,
+            cancel_reason="",
+        )
+        return state_path
+
+    def fake_speak_response(_cfg, text, *, cancel_check):
+        assert text == "spoken answer"
+        assert cancel_check() is False
+        popup.request_cancel(state_path, reason="ctrl_c")
+        assert cancel_check() is True
+
+    wake.STOP.clear()
+    monkeypatch.setattr(wake, "save_activation_archive", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "launch_visualization", fake_launch_visualization)
+    monkeypatch.setattr(wake, "maybe_beep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "record_command", lambda *_args, **_kwargs: command_path)
+    monkeypatch.setattr(wake, "archive_command_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "transcribe_command", lambda *_args, **_kwargs: "what is up")
+    monkeypatch.setattr(wake, "route_transcribed_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "answer_routed_request", lambda *_args, **_kwargs: ("spoken answer", [], "heavy_agent"))
+    monkeypatch.setattr(wake, "speak_response", fake_speak_response)
+
+    wake.handle_activation({"conversation_mode_enabled": False}, {"probability": 0.9})
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "cancelled"
+    assert state["cancel_reason"] == "ctrl_c"
+
+
+def test_handle_activation_passes_popup_cancel_check_to_heavy_agent_execution(monkeypatch, tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+
+    def fake_launch_visualization(_cfg, probability):
+        wake.update_visualization_state(
+            state_path,
+            status="listening",
+            probability=probability,
+            cancel_requested=False,
+            cancel_reason="",
+        )
+        return state_path
+
+    def fake_answer_routed_request(_cfg, transcript, plan, history, *, cancel_check):
+        assert transcript == "start a complex task"
+        assert cancel_check() is False
+        popup.request_cancel(state_path, reason="ctrl_c")
+        assert cancel_check() is True
+        return None, history, "heavy_agent"
+
+    wake.STOP.clear()
+    monkeypatch.setattr(wake, "save_activation_archive", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "launch_visualization", fake_launch_visualization)
+    monkeypatch.setattr(wake, "maybe_beep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "record_command", lambda *_args, **_kwargs: command_path)
+    monkeypatch.setattr(wake, "archive_command_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "transcribe_command", lambda *_args, **_kwargs: "start a complex task")
+    monkeypatch.setattr(wake, "route_transcribed_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(wake, "answer_routed_request", fake_answer_routed_request)
+    monkeypatch.setattr(wake, "speak_response", lambda *_args, **_kwargs: None)
+
+    wake.handle_activation({"conversation_mode_enabled": False}, {"probability": 0.9})
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "cancelled"
+    assert state["cancel_reason"] == "ctrl_c"
 
 
 def test_save_activation_archive_writes_wake_clip_and_metadata(tmp_path):

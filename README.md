@@ -276,7 +276,7 @@ Also make sure your default audio output works in normal desktop apps.
 
 ### The popup window gets stuck
 
-You can press Ctrl-C in the popup to cancel the active voice session. If needed, restart the service:
+You can press Ctrl-C in the popup to cancel the active voice session. Cancellation is wired into the Hermes execution layer: the daemon calls `AIAgent.interrupt()` for the warm in-process agent, which propagates to active tools and subagents, and the subprocess fallback is launched in its own process group so it can be terminated as a whole. If needed, restart the service:
 
 ```bash
 systemctl --user restart hermes-wakeword.service
@@ -293,11 +293,12 @@ This section is for users who want to know how it works or tune the system more 
 3. When the model probability passes the configured threshold for enough windows, the daemon plays a beep.
 4. The daemon records the spoken request until silence.
 5. Hermes transcribes the audio through the STT provider configured in Hermes.
-6. The request goes to a warm in-process Hermes Agent for lower latency than launching a new CLI process each time.
-7. Hermes generates a response with the user's normal model/provider/toolsets.
-8. Hermes TTS creates spoken audio.
-9. The daemon plays the answer through PulseAudio/PipeWire.
-10. If conversation mode is enabled, the daemon keeps listening for follow-up turns until a close phrase is heard.
+6. The interaction router classifies the transcript and schedules any short acknowledgement clip (for example “Okay, I’m on it.”) asynchronously, so the full Hermes agent can start immediately instead of waiting for the clip to finish.
+7. The request goes to a warm in-process Hermes Agent for lower latency than launching a new CLI process each time.
+8. Hermes generates a response with the user's normal model/provider/toolsets.
+9. Hermes TTS creates spoken audio.
+10. The daemon plays the answer through PulseAudio/PipeWire.
+11. If conversation mode is enabled, the daemon keeps listening for follow-up turns until a close phrase is heard.
 
 ### Wakeword model
 
@@ -342,12 +343,14 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `hermes_inprocess`: use the warm in-process Hermes Agent path.
 - `hermes_warm_agent`: keep the agent initialized between turns.
 - `hermes_max_iterations`: maximum Hermes tool/reasoning loop iterations.
+- `hermes_cancel_poll_seconds`: how often the daemon checks popup cancellation while Hermes is running.
+- `hermes_interrupt_wait_seconds`: grace period after interrupt/SIGTERM before dropping the warm agent or escalating subprocess shutdown.
 - `hermes_load_soul_identity`: load the normal Hermes identity/persona file.
 - `interaction_router_enabled`: classify transcripts after STT and before the full agent.
 - `interaction_router_model`: fast structured router model, defaulting to Gemini Flash Lite.
 - `interaction_router_min_confidence`: below this, route conservatively to the full Hermes agent.
 - `interaction_router_small_model_enabled`: allow simple/safe requests to bypass the full agent.
-- `interaction_router_ack_cache_enabled`: cache short acknowledgement clips like “Got it.”
+- `interaction_router_ack_cache_enabled`: cache short acknowledgement clips like “Okay, I’m on it.” Cached files preserve the TTS provider's audio extension, and acknowledgements are played asynchronously before full-agent work.
 - `playback_sink`: `@DEFAULT_SINK@`, `all`, or a specific Pulse/PipeWire sink name.
 - `visualization_enabled`: open the optional popup window.
 - `conversation_mode_enabled`: keep listening after the first answer.

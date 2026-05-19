@@ -44,9 +44,10 @@ import sounddevice as sd  # noqa: E402
 import yaml  # noqa: E402
 
 from tools.tts_tool import text_to_speech_tool  # noqa: E402
-from tools.voice_mode import is_whisper_hallucination, play_audio_file, play_beep, transcribe_recording  # noqa: E402
+from tools.voice_mode import is_whisper_hallucination, play_audio_file, play_beep, stop_playback, transcribe_recording  # noqa: E402
 
 from .interaction_router import (  # noqa: E402
+    ACK_TEXT,
     AckTemplate,
     AcknowledgementCache,
     InteractionRouterConfig,
@@ -83,6 +84,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "hermes_toolsets": None,
     "hermes_warm_agent": True,
     "hermes_max_iterations": 90,
+    "hermes_cancel_poll_seconds": 0.1,
+    "hermes_interrupt_wait_seconds": 5.0,
     # Keep project context files skipped for a daemon launched from arbitrary
     # directories, but still load ~/.hermes/SOUL.md so voice mode has the same
     # persona and operating discipline as the normal Hermes CLI.
@@ -693,10 +696,217 @@ def get_warm_hermes_agent(cfg: Dict[str, Any], provider: Optional[str], model: O
     return agent
 
 
+class _UseSubprocessForCancellation(RuntimeError):
+    """Internal sentinel for falling through to process-group cancellable Hermes."""
+
+
+def _execution_cancel_requested(cancel_check: Optional[Callable[[], bool]]) -> bool:
+    """Return True when the voice session has requested cancellation."""
+    if STOP.is_set():
+        return True
+    if cancel_check is None:
+        return False
+    try:
+        return bool(cancel_check())
+    except Exception as exc:
+        LOG.warning("Hermes execution cancel check failed: %s", exc)
+        return False
+
+
+def _hermes_cancel_poll_seconds(cfg: Dict[str, Any]) -> float:
+    return max(0.01, min(float(cfg.get("hermes_cancel_poll_seconds") or 0.1), 1.0))
+
+
+def _hermes_interrupt_wait_seconds(cfg: Dict[str, Any]) -> float:
+    return max(0.1, min(float(cfg.get("hermes_interrupt_wait_seconds") or 5.0), 60.0))
+
+
+def _interrupt_hermes_agent(agent: Any, message: str = "Voice session cancelled") -> None:
+    interrupt = getattr(agent, "interrupt", None)
+    if not callable(interrupt):
+        LOG.warning("Warm Hermes agent has no interrupt() method; cannot signal graceful cancellation")
+        return
+    try:
+        interrupt(message)
+    except Exception as exc:
+        LOG.warning("Failed to interrupt warm Hermes agent: %s", exc)
+
+
+def _collect_hermes_process_output(proc: subprocess.Popen[Any]) -> Tuple[str, str]:
+    try:
+        out, err = proc.communicate(timeout=0.2)
+    except TypeError:
+        try:
+            out, err = proc.communicate()
+        except Exception:
+            out, err = "", ""
+    except Exception:
+        out, err = getattr(proc, "stdout", "") or "", getattr(proc, "stderr", "") or ""
+    return str(out or ""), str(err or "")
+
+
+def _terminate_hermes_process_group(proc: subprocess.Popen[Any], grace_seconds: float) -> None:
+    """Terminate a `hermes chat` process group so child tool subprocesses die too."""
+    if proc.poll() is not None:
+        return
+    pid = int(getattr(proc, "pid", 0) or 0)
+    if pid:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception as exc:
+            LOG.warning("Could not SIGTERM Hermes process group %s: %s; trying process terminate", pid, exc)
+            with contextlib.suppress(Exception):
+                proc.terminate()
+    else:
+        with contextlib.suppress(Exception):
+            proc.terminate()
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        LOG.warning("Hermes process group did not stop after %.1fs; sending SIGKILL", grace_seconds)
+    except Exception:
+        return
+    if pid:
+        with contextlib.suppress(Exception):
+            os.killpg(pid, signal.SIGKILL)
+    else:
+        with contextlib.suppress(Exception):
+            proc.kill()
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=1.0)
+
+
+def _run_warm_hermes_agent_turn(
+    cfg: Dict[str, Any],
+    agent: Any,
+    prompt: str,
+    transcript: str,
+    history: List[Dict[str, Any]],
+    cancel_check: Optional[Callable[[], bool]],
+) -> Tuple[Optional[str], List[Dict[str, Any]], bool]:
+    """Run warm AIAgent on a worker thread so popup cancellation can call agent.interrupt()."""
+    if cancel_check is None and not STOP.is_set():
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                result = agent.run_conversation(
+                    prompt,
+                    conversation_history=history,
+                    persist_user_message=transcript,
+                )
+        response = result.get("final_response") if isinstance(result, dict) else result
+        if isinstance(result, dict) and isinstance(result.get("messages"), list):
+            history = result["messages"]
+        return (response or None), history, False
+
+    done = threading.Event()
+    result_holder: Dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            with open(os.devnull, "w", encoding="utf-8") as devnull:
+                with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    result_holder["result"] = agent.run_conversation(
+                        prompt,
+                        conversation_history=history,
+                        persist_user_message=transcript,
+                    )
+        except BaseException as exc:  # noqa: BLE001 - propagate from worker after join
+            result_holder["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_runner, name="okay-hermes-agent-turn", daemon=True)
+    thread.start()
+    poll_interval = _hermes_cancel_poll_seconds(cfg)
+    interrupted_for_cancel = False
+    while not done.wait(poll_interval):
+        if _execution_cancel_requested(cancel_check):
+            interrupted_for_cancel = True
+            LOG.info("Voice cancellation requested; interrupting warm Hermes agent")
+            _interrupt_hermes_agent(agent)
+            done.wait(_hermes_interrupt_wait_seconds(cfg))
+            if not done.is_set():
+                LOG.warning("Warm Hermes agent did not finish after interruption; dropping cached agent")
+            _HERMES_AGENT_CACHE.clear()
+            return None, history, True
+
+    if result_holder.get("error") is not None:
+        raise result_holder["error"]
+    result = result_holder.get("result")
+    if _execution_cancel_requested(cancel_check):
+        interrupted_for_cancel = True
+        _HERMES_AGENT_CACHE.clear()
+    if interrupted_for_cancel or (isinstance(result, dict) and result.get("interrupted") and _execution_cancel_requested(cancel_check)):
+        return None, history, True
+    response = result.get("final_response") if isinstance(result, dict) else result
+    if isinstance(result, dict) and isinstance(result.get("messages"), list):
+        history = result["messages"]
+    return (response or None), history, False
+
+
+def _run_hermes_subprocess_turn(
+    cfg: Dict[str, Any],
+    cmd: List[str],
+    transcript: str,
+    history: List[Dict[str, Any]],
+    cancel_check: Optional[Callable[[], bool]],
+) -> Tuple[Optional[str], List[Dict[str, Any]], bool]:
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(Path.home()),
+            start_new_session=True,
+        )
+    except Exception as exc:
+        LOG.exception("Failed to invoke Hermes: %s", exc)
+        return f"I could not start Hermes: {exc}", history, False
+
+    timeout = float(cfg.get("hermes_timeout_seconds") or DEFAULT_CONFIG["hermes_timeout_seconds"])
+    deadline = time.monotonic() + timeout
+    poll_interval = _hermes_cancel_poll_seconds(cfg)
+    while proc.poll() is None:
+        if _execution_cancel_requested(cancel_check):
+            LOG.info("Voice cancellation requested; terminating Hermes subprocess group")
+            _terminate_hermes_process_group(proc, _hermes_interrupt_wait_seconds(cfg))
+            _collect_hermes_process_output(proc)
+            return None, history, True
+        if time.monotonic() >= deadline:
+            LOG.error("Hermes command timed out")
+            _terminate_hermes_process_group(proc, _hermes_interrupt_wait_seconds(cfg))
+            _collect_hermes_process_output(proc)
+            return "Hermes timed out while handling that request.", history, False
+        time.sleep(poll_interval)
+
+    stdout, stderr = _collect_hermes_process_output(proc)
+    LOG.info("Hermes subprocess latency: %.2fs", time.monotonic() - started)
+    if stderr.strip():
+        LOG.warning("Hermes stderr: %s", strip_ansi(stderr).strip())
+    response = clean_hermes_output(stdout)
+    if proc.returncode != 0:
+        LOG.error("Hermes exited with %s; stdout=%r", proc.returncode, response)
+        return response or f"Hermes exited with status {proc.returncode}.", history, False
+    LOG.info("Hermes response: %s", response[:1000])
+    if response:
+        history.extend([
+            {"role": "user", "content": transcript},
+            {"role": "assistant", "content": response},
+        ])
+    return response or None, history, False
+
+
 def ask_hermes_turn(
     cfg: Dict[str, Any],
     transcript: str,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    *,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
     prompt_prefix = str(cfg.get("hermes_prompt_prefix") or "").strip()
     prompt = f"{prompt_prefix}\n\nTranscript:\n{transcript}" if prompt_prefix else transcript
@@ -718,16 +928,19 @@ def ask_hermes_turn(
         try:
             if cfg.get("hermes_warm_agent", True):
                 agent = get_warm_hermes_agent(cfg, provider, model, toolsets)
-                with open(os.devnull, "w", encoding="utf-8") as devnull:
-                    with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                        result = agent.run_conversation(
-                            prompt,
-                            conversation_history=history,
-                            persist_user_message=transcript,
-                        )
-                        response = result.get("final_response") if isinstance(result, dict) else result
-                        if isinstance(result, dict) and isinstance(result.get("messages"), list):
-                            history = result["messages"]
+                response, history, cancelled = _run_warm_hermes_agent_turn(
+                    cfg,
+                    agent,
+                    prompt,
+                    transcript,
+                    history,
+                    cancel_check,
+                )
+                if cancelled:
+                    return None, history
+            elif cancel_check is not None:
+                LOG.info("Non-warm in-process Hermes is not interruptible; using cancellable subprocess path")
+                raise _UseSubprocessForCancellation()
             else:
                 from hermes_cli.oneshot import _run_agent
                 with open(os.devnull, "w", encoding="utf-8") as devnull:
@@ -743,10 +956,15 @@ def ask_hermes_turn(
             LOG.info("Hermes in-process latency: %.2fs", time.monotonic() - started)
             LOG.info("Hermes response: %s", response[:1000])
             return response or None, history
+        except _UseSubprocessForCancellation:
+            pass
         except Exception as exc:
+            if _execution_cancel_requested(cancel_check):
+                LOG.info("Hermes in-process execution cancelled")
+                return None, history
             LOG.exception("In-process Hermes failed; falling back to subprocess: %s", exc)
 
-    hermes_bin = str(cfg["hermes_bin"])
+    hermes_bin = str(cfg.get("hermes_bin") or DEFAULT_CONFIG["hermes_bin"])
     cmd = [hermes_bin, "chat", "-Q", "--source", str(cfg.get("hermes_source") or "wakeword")]
     if provider:
         cmd.extend(["--provider", provider])
@@ -756,38 +974,8 @@ def ask_hermes_turn(
         cmd.extend(["-t", ",".join(toolsets) if isinstance(toolsets, list) else str(toolsets)])
     cmd.extend(["-q", prompt])
 
-    started = time.monotonic()
-    try:
-        proc = subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=float(cfg["hermes_timeout_seconds"]),
-            cwd=str(Path.home()),
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        LOG.error("Hermes command timed out")
-        return "Hermes timed out while handling that request.", history
-    except Exception as exc:
-        LOG.exception("Failed to invoke Hermes: %s", exc)
-        return f"I could not start Hermes: {exc}", history
-
-    LOG.info("Hermes subprocess latency: %.2fs", time.monotonic() - started)
-    if proc.stderr.strip():
-        LOG.warning("Hermes stderr: %s", strip_ansi(proc.stderr).strip())
-    response = clean_hermes_output(proc.stdout)
-    if proc.returncode != 0:
-        LOG.error("Hermes exited with %s; stdout=%r", proc.returncode, response)
-        return response or f"Hermes exited with status {proc.returncode}.", history
-    LOG.info("Hermes response: %s", response[:1000])
-    if response:
-        history.extend([
-            {"role": "user", "content": transcript},
-            {"role": "assistant", "content": response},
-        ])
-    return response or None, history
+    response, history, _cancelled = _run_hermes_subprocess_turn(cfg, cmd, transcript, history, cancel_check)
+    return response, history
 
 
 def ask_hermes(cfg: Dict[str, Any], transcript: str) -> Optional[str]:
@@ -820,8 +1008,144 @@ def _configured_playback_sinks(cfg: Dict[str, Any]) -> List[str]:
         return ["@DEFAULT_SINK@"]
 
 
-def play_tts_file(cfg: Dict[str, Any], file_path: str) -> bool:
+def _playback_cancel_requested(cancel_check: Optional[Callable[[], bool]]) -> bool:
+    if STOP.is_set():
+        return True
+    if cancel_check is None:
+        return False
+    try:
+        return bool(cancel_check())
+    except Exception as exc:
+        LOG.warning("Playback cancel check failed: %s", exc)
+        return False
+
+
+def _terminate_playback_process(label: str, proc: subprocess.Popen[Any]) -> None:
+    if proc.poll() is not None:
+        return
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=1.0)
+        return
+    except subprocess.TimeoutExpired:
+        LOG.info("%s playback did not stop after terminate; killing", label)
+    except Exception:
+        return
+    with contextlib.suppress(Exception):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=1.0)
+
+
+def _collect_playback_output(proc: subprocess.Popen[Any]) -> Tuple[str, str]:
+    try:
+        out, err = proc.communicate(timeout=0.2)
+        return str(out or ""), str(err or "")
+    except Exception:
+        return str(getattr(proc, "stdout", "") or ""), str(getattr(proc, "stderr", "") or "")
+
+
+def _wait_playback_process(
+    label: str,
+    proc: subprocess.Popen[Any],
+    cancel_check: Optional[Callable[[], bool]],
+    timeout: float = 300.0,
+) -> Tuple[bool, bool]:
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if _playback_cancel_requested(cancel_check):
+            _terminate_playback_process(label, proc)
+            LOG.info("%s playback cancelled", label)
+            return False, True
+        if time.monotonic() >= deadline:
+            _terminate_playback_process(label, proc)
+            LOG.warning("%s playback timed out", label)
+            return False, False
+        time.sleep(0.05)
+
+    out, err = _collect_playback_output(proc)
+    if proc.returncode == 0:
+        return True, False
+    LOG.warning("%s playback exited %s: %s", label, proc.returncode, (err or out or "").strip())
+    return False, False
+
+
+def _wait_playback_processes(
+    procs: List[Tuple[str, List[str], subprocess.Popen[Any]]],
+    cancel_check: Optional[Callable[[], bool]],
+    timeout: float = 300.0,
+) -> Tuple[bool, bool]:
+    deadline = time.monotonic() + timeout
+    pending = list(procs)
+    success = False
+    while pending:
+        if _playback_cancel_requested(cancel_check):
+            for label, _cmd, proc in pending:
+                _terminate_playback_process(label, proc)
+            LOG.info("Concurrent playback cancelled")
+            return False, True
+
+        for item in list(pending):
+            label, _cmd, proc = item
+            if proc.poll() is None:
+                continue
+            out, err = _collect_playback_output(proc)
+            if proc.returncode == 0:
+                success = True
+            else:
+                LOG.warning("%s playback exited %s: %s", label, proc.returncode, (err or out or "").strip())
+            pending.remove(item)
+
+        if pending and time.monotonic() >= deadline:
+            for label, _cmd, proc in pending:
+                _terminate_playback_process(label, proc)
+            LOG.warning("Concurrent playback timed out")
+            return success, False
+        if pending:
+            time.sleep(0.05)
+    return success, False
+
+
+def _play_hermes_audio_file_with_cancel(file_path: str, cancel_check: Optional[Callable[[], bool]]) -> bool:
+    if cancel_check is None:
+        return bool(play_audio_file(str(file_path)))
+
+    done = threading.Event()
+    result: Dict[str, Any] = {"ok": False}
+
+    def _run() -> None:
+        try:
+            result["ok"] = bool(play_audio_file(str(file_path)))
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    while not done.wait(0.05):
+        if _playback_cancel_requested(cancel_check):
+            with contextlib.suppress(Exception):
+                stop_playback()
+            done.wait(2.0)
+            LOG.info("Hermes fallback playback cancelled")
+            return False
+    if result.get("error"):
+        LOG.warning("Hermes fallback playback failed: %s", result["error"])
+        return False
+    return bool(result.get("ok"))
+
+
+def play_tts_file(
+    cfg: Dict[str, Any],
+    file_path: str,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> bool:
     """Play TTS through PipeWire/Pulse first, then fall back to Hermes playback."""
+    if _playback_cancel_requested(cancel_check):
+        LOG.info("Playback skipped because cancellation is already requested")
+        return False
     sinks = _configured_playback_sinks(cfg)
     volume = max(0.0, min(float(cfg.get("playback_volume") or 1.0), 1.5))
     paplay_volume = str(int(min(volume, 1.0) * 65536))
@@ -847,35 +1171,34 @@ def play_tts_file(cfg: Dict[str, Any], file_path: str) -> bool:
                 LOG.warning("Playback command missing: %s", label)
             except Exception as exc:
                 LOG.warning("Could not start %s: %s", label, exc)
-        for label, cmd, proc in procs:
-            try:
-                out, err = proc.communicate(timeout=300)
-                if proc.returncode == 0:
-                    success = True
-                else:
-                    LOG.warning("%s playback exited %s: %s", label, proc.returncode, (err or out or "").strip())
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                LOG.warning("%s playback timed out", label)
+        success, cancelled = _wait_playback_processes(procs, cancel_check)
+        if cancelled:
+            return False
         if success:
             return True
 
     for label, cmd in players:
         try:
+            if _playback_cancel_requested(cancel_check):
+                LOG.info("Playback cancelled before starting %s", label)
+                return False
             LOG.info("Trying %s playback: %s", label, " ".join(cmd[:5]))
-            proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=False)
-            if proc.returncode == 0:
+            proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            ok, cancelled = _wait_playback_process(label, proc, cancel_check)
+            if cancelled:
+                return False
+            if ok:
                 return True
-            LOG.warning("%s playback exited %s: %s", label, proc.returncode, (proc.stderr or proc.stdout or "").strip())
         except FileNotFoundError:
             LOG.warning("Playback command missing: %s", label)
-        except subprocess.TimeoutExpired:
-            LOG.warning("%s playback timed out", label)
         except Exception as exc:
             LOG.warning("%s playback failed: %s", label, exc)
 
+    if _playback_cancel_requested(cancel_check):
+        LOG.info("Playback cancelled before Hermes fallback")
+        return False
     LOG.info("Falling back to Hermes play_audio_file")
-    return bool(play_audio_file(str(file_path)))
+    return _play_hermes_audio_file_with_cancel(str(file_path), cancel_check)
 
 
 def interaction_router_config_from_daemon_config(cfg: Dict[str, Any]) -> InteractionRouterConfig:
@@ -924,40 +1247,90 @@ def _generate_ack_tts(text: str, out_path: Path) -> Path:
         raise RuntimeError(f"TTS failed for acknowledgement: {result}")
     source = Path(str(result["file_path"])).expanduser()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if source.resolve() != out_path.resolve():
-        shutil.copyfile(source, out_path)
-    return out_path
+    target = out_path.with_suffix(source.suffix or out_path.suffix)
+    if source.resolve() != target.resolve():
+        shutil.copyfile(source, target)
+    return target
 
 
-def play_interaction_ack(cfg: Dict[str, Any], template_id: AckTemplate) -> bool:
-    """Play a short receipt-only acknowledgement before longer work starts."""
+def _play_interaction_ack_sync(
+    cfg: Dict[str, Any],
+    template_id: AckTemplate,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> bool:
     if template_id is AckTemplate.NONE or not cfg.get("tts_enabled", True):
         return False
     router_cfg = interaction_router_config_from_daemon_config(cfg)
     if not router_cfg.ack_cache_enabled:
         from .interaction_router import ACK_TEXT
-        speak_response(cfg, ACK_TEXT[template_id])
+        speak_response(cfg, ACK_TEXT[template_id], cancel_check=cancel_check)
         return True
     cache = AcknowledgementCache(
         router_cfg.ack_cache_path,
         tts_generator=_generate_ack_tts,
-        audio_player=lambda path: play_tts_file(cfg, str(path)),
+        audio_player=lambda path: play_tts_file(cfg, str(path), cancel_check=cancel_check),
     )
     try:
+        LOG.info("Playing interaction acknowledgement: %s", template_id.value)
         return cache.play(template_id)
     except Exception as exc:
         LOG.warning("Could not play cached interaction acknowledgement: %s", exc)
         return False
 
 
-def route_transcribed_request(cfg: Dict[str, Any], transcript: str) -> Optional[VoiceRequestPlan]:
+def play_interaction_ack(
+    cfg: Dict[str, Any],
+    template_id: AckTemplate,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    *,
+    block: bool = True,
+) -> bool:
+    """Play a short receipt-only acknowledgement before longer work starts."""
+    if block:
+        return _play_interaction_ack_sync(cfg, template_id, cancel_check=cancel_check)
+    if template_id is AckTemplate.NONE or not cfg.get("tts_enabled", True):
+        return False
+
+    def _run_ack() -> None:
+        _play_interaction_ack_sync(cfg, template_id, cancel_check=cancel_check)
+
+    thread = threading.Thread(
+        target=_run_ack,
+        name=f"okay-hermes-ack-{template_id.value}",
+        daemon=True,
+    )
+    thread.start()
+    LOG.info("Scheduled interaction acknowledgement: %s", template_id.value)
+    return True
+
+
+def route_transcribed_request(
+    cfg: Dict[str, Any],
+    transcript: str,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Optional[VoiceRequestPlan]:
     """Plan routing for a final STT transcript and play any immediate acknowledgement."""
     plan = plan_interaction_route(cfg, transcript)
     if plan is None:
         return None
     if plan.route.ack_template_id is not AckTemplate.NONE:
-        play_interaction_ack(cfg, plan.route.ack_template_id)
+        play_interaction_ack(cfg, plan.route.ack_template_id, cancel_check=cancel_check, block=False)
     return plan
+
+
+def interaction_ack_text(plan: Optional[VoiceRequestPlan]) -> str:
+    if plan is None or plan.route.ack_template_id is AckTemplate.NONE:
+        return ""
+    return ACK_TEXT.get(plan.route.ack_template_id, "")
+
+
+def routed_request_status_message(plan: Optional[VoiceRequestPlan]) -> str:
+    route_target = plan.route.target.value if plan else "heavy_agent"
+    route_label = route_target.replace("_", " ")
+    ack_text = interaction_ack_text(plan)
+    if ack_text:
+        return f"{ack_text} Request routed to {route_label}. Handling it now…"
+    return f"Request routed to {route_label}. Handling it now…"
 
 
 def answer_routed_request(
@@ -965,6 +1338,8 @@ def answer_routed_request(
     transcript: str,
     plan: Optional[VoiceRequestPlan],
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    *,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[Optional[str], List[Dict[str, Any]], str]:
     """Execute the selected route, falling back to heavy Hermes when needed."""
     history = list(conversation_history or [])
@@ -982,11 +1357,16 @@ def answer_routed_request(
             ])
             return response, history, "small_model"
         LOG.info("Small-model route produced no response; falling back to heavy Hermes")
-    response, history = ask_hermes_turn(cfg, transcript, history)
+    response, history = ask_hermes_turn(cfg, transcript, history, cancel_check=cancel_check)
     return response, history, "heavy_agent"
 
 
-def speak_response(cfg: Dict[str, Any], text: str) -> None:
+def speak_response(
+    cfg: Dict[str, Any],
+    text: str,
+    *,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> None:
     if not cfg.get("tts_enabled", True):
         LOG.info("TTS disabled; response not spoken")
         return
@@ -1009,8 +1389,8 @@ def speak_response(cfg: Dict[str, Any], text: str) -> None:
         LOG.error("TTS response missing file_path: %s", result)
         return
     LOG.info("Playing TTS: %s", file_path)
-    ok = play_tts_file(cfg, str(file_path))
-    if not ok:
+    ok = play_tts_file(cfg, str(file_path), cancel_check=cancel_check)
+    if not ok and not _playback_cancel_requested(cancel_check):
         LOG.error("Audio playback failed: %s", file_path)
 
 
@@ -1394,7 +1774,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                     response=ack,
                     error="",
                 )
-                speak_response(cfg, ack)
+                speak_response(cfg, ack, cancel_check=voice_cancel_requested)
             update_visualization_state(
                 visual_state,
                 status="done",
@@ -1413,19 +1793,19 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             LOG.info("Voice conversation closed by transcript: %r", transcript)
             return
 
-        interaction_plan = route_transcribed_request(cfg, transcript)
+        interaction_plan = route_transcribed_request(cfg, transcript, cancel_check=voice_cancel_requested)
         if stop_if_cancelled():
             return
-        route_target = interaction_plan.route.target.value if interaction_plan else "heavy_agent"
 
         update_visualization_state(
             visual_state,
             status="thinking",
-            message=f"Request routed to {route_target.replace('_', ' ')}. Handling it now…",
+            message=routed_request_status_message(interaction_plan),
             transcript=transcript,
             response="",
             error="",
             current_turn=turn_index,
+            interaction_ack_text=interaction_ack_text(interaction_plan),
         )
         router_metadata: Dict[str, Any] = {}
         if interaction_plan:
@@ -1433,6 +1813,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                 "interaction_route_target": interaction_plan.route.target.value,
                 "interaction_route_reason": interaction_plan.route.reason,
                 "interaction_ack_template": interaction_plan.route.ack_template_id.value,
+                "interaction_ack_text": interaction_ack_text(interaction_plan),
                 "interaction_router_confidence": interaction_plan.decision.confidence,
                 "interaction_router_reason": interaction_plan.decision.brief_reason,
             }
@@ -1447,7 +1828,11 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
         if stop_if_cancelled():
             return
         response, hermes_history, response_source = answer_routed_request(
-            cfg, transcript, interaction_plan, hermes_history
+            cfg,
+            transcript,
+            interaction_plan,
+            hermes_history,
+            cancel_check=voice_cancel_requested,
         )
         if stop_if_cancelled():
             return
@@ -1483,7 +1868,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             )
             if stop_if_cancelled():
                 return
-            speak_response(cfg, response)
+            speak_response(cfg, response, cancel_check=voice_cancel_requested)
             if stop_if_cancelled():
                 return
             if not conversation_enabled:
