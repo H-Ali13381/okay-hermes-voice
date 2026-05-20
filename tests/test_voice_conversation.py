@@ -710,12 +710,19 @@ def test_handle_activation_passes_popup_cancel_check_to_heavy_agent_execution(mo
     assert state["cancel_reason"] == "ctrl_c"
 
 
+def test_default_wakeword_model_matches_public_artifact():
+    assert wake.DEFAULT_CONFIG["model_path"].endswith(
+        "okay-hermes-repcnn-onnx/wakeword.onnx"
+    )
+    assert wake.DEFAULT_CONFIG["threshold"] == 0.6973556280136108
+
+
 def test_save_activation_archive_writes_wake_clip_and_metadata(tmp_path):
     cfg = {
         "activation_archive_dir": str(tmp_path / "activations"),
         "sample_rate": 16000,
         "window_seconds": 3.0,
-        "threshold": 0.4112943708896637,
+        "threshold": 0.6973556280136108,
         "model_path": "/models/okay-hermes.onnx",
     }
     waveform = np.linspace(-0.5, 0.5, 16000, dtype=np.float32)

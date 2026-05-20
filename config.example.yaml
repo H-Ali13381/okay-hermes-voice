@@ -1,8 +1,8 @@
 # Example config for okay-hermes-voice.
 # Copy to ~/.hermes/wakeword/config.yaml and edit paths as needed.
 
-model_path: ~/.hermes/wakeword/okay-hermes-repcnn-onnx/retrained_20260510_165910_folded.onnx
-threshold: 0.4112943708896637
+model_path: ~/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx
+threshold: 0.6973556280136108
 trigger_consecutive_windows: 2
 inference_interval_seconds: 0.5
 cooldown_seconds: 2.5

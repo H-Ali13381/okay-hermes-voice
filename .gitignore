@@ -17,3 +17,6 @@ activations/
 *.onnx
 config.yaml
 .env
+
+# Other local files
+hermes_full_duplex_threaded_voice_plan.md

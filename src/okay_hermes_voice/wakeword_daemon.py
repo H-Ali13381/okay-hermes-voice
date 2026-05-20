@@ -59,8 +59,8 @@ from .interaction_router import (  # noqa: E402
 
 CONFIG_PATH = HERMES_HOME / "wakeword" / "config.yaml"
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "model_path": str(HERMES_HOME / "wakeword" / "okay-hermes-repcnn-onnx" / "retrained_20260510_165910_folded.onnx"),
-    "threshold": 0.4112943708896637,
+    "model_path": str(HERMES_HOME / "wakeword" / "okay-hermes-repcnn-onnx" / "wakeword.onnx"),
+    "threshold": 0.6973556280136108,
     "trigger_consecutive_windows": 2,
     "inference_interval_seconds": 0.25,
     "cooldown_seconds": 2.5,

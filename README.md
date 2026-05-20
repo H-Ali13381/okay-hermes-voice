@@ -153,10 +153,10 @@ Most users only need a few options.
 
 ### If Hermes wakes too often
 
-Raise the wake threshold a little:
+Raise the wake threshold above the default `0.6973556280136108`:
 
 ```yaml
-threshold: 0.45
+threshold: 0.75
 ```
 
 You can also require more repeated wake detections before it triggers:
@@ -173,10 +173,10 @@ systemctl --user restart hermes-wakeword.service
 
 ### If Hermes does not wake reliably
 
-Lower the wake threshold a little:
+Lower the wake threshold below the default `0.6973556280136108`:
 
 ```yaml
-threshold: 0.38
+threshold: 0.62
 ```
 
 Do not lower it too far or random speech may trigger it.
@@ -309,22 +309,22 @@ https://github.com/H-Ali13381/okay-hermes-repcnn-onnx
 Expected default artifact:
 
 ```text
-~/.hermes/wakeword/okay-hermes-repcnn-onnx/retrained_20260510_165910_folded.onnx
+~/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx
 ```
 
 Known SHA256 for that artifact:
 
 ```text
-e705d3af445ab38666b06a1f475339ca47b3f8645e6d53d056a11db0a7a9fb19
+f022856f17916f5c7b2d8041f44308f889f292d92be12b71e1fe3ee49bd0a0fc
 ```
 
 Model assumptions:
 
 - input name: `waveform`
-- input shape: `(batch, 48000)`
+- input shape: `(batch, time)`; use 48,000 samples per row for the 3-second default window
 - audio: mono float32, 16 kHz, exactly 3 seconds
-- output name: `probabilities`
-- recommended threshold: `0.4112943708896637`
+- output name: `score` (the daemon discovers the model output name dynamically)
+- recommended threshold: `0.6973556280136108`
 
 ### Configuration reference
 
