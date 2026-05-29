@@ -10,6 +10,7 @@ sample_rate: 16000
 window_seconds: 3.0
 block_seconds: 0.1
 speech_rms_threshold: 200
+speech_start_consecutive_blocks: 2
 speech_start_timeout_seconds: 15.0
 speech_silence_duration_seconds: 1.1
 max_command_seconds: 120.0

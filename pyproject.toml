@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "okay-hermes-voice"
-version = "0.1.0"
+version = "0.1.1"
 description = "Always-on Okay Hermes wakeword voice daemon for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11"
