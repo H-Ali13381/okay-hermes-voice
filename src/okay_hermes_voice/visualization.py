@@ -132,7 +132,18 @@ def _visualization_command_for_terminal(exe: str, title: str, program: List[str]
         # Popen below is already non-blocking. Avoid kitty --detach so launch
         # failures stay attached to the process we start instead of being hidden
         # behind a daemonizing parent that exits before the window is usable.
-        return [exe, "--title", title, "--class", "hermes-voice", *program]
+        # The popup owns an internal TUI viewport, so disable kitty scrollback to
+        # stop mouse-wheel gestures from escaping into an expanding buffer.
+        return [
+            exe,
+            "--title",
+            title,
+            "--class",
+            "hermes-voice",
+            "--override",
+            "scrollback_lines=0",
+            *program,
+        ]
     if name == "konsole":
         return [exe, "--title", title, "-e", *program]
     if name == "alacritty":
