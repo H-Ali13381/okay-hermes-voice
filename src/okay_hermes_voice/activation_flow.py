@@ -33,6 +33,10 @@ from .voice_routing import (
 VOICE_SESSION_COMPLETED = "completed"
 VOICE_SESSION_CANCELLED = "cancelled"
 
+# Small, stable stage names make the popup and the archived timing fields line
+# up: ``route_seconds`` measures the code that runs while ``pipeline_stage`` is
+# ``route``, ``answer_seconds`` lines up with ``answer``, and so on.
+# Human-readable messages can change; these keys should stay boring.
 PIPELINE_STAGE_MESSAGES = {
     "record": "record: recording your request now…",
     "transcript": "transcript: speech captured; converting it to text…",
@@ -44,7 +48,11 @@ PIPELINE_STAGE_MESSAGES = {
 
 
 def _publish_pipeline_stage(visual_state: Any, stage: str, message: str | None = None, **updates: Any) -> None:
-    """Publish a descriptive, user-visible voice pipeline stage to the popup."""
+    """Publish one named voice-pipeline stage to the popup state file.
+
+    ``status`` keeps compatibility with the existing popup state shape, while
+    ``pipeline_stage`` gives tests and reviewers a stable stage vocabulary.
+    """
     update_visualization_state(
         visual_state,
         status=stage,
@@ -55,12 +63,18 @@ def _publish_pipeline_stage(visual_state: Any, stage: str, message: str | None =
 
 
 def _elapsed_seconds(started: float) -> float:
-    """Return a monotonic non-negative elapsed duration for observability fields."""
+    """Return a monotonic duration for in-process work.
+
+    Do not use wall-clock deltas for these fields; NTP/timezone/system-clock
+    changes should not make an STT or playback duration negative.
+    """
     return max(0.0, time.monotonic() - started)
 
 
 def _merge_speak_timing(turn_timing: Dict[str, Any], speak_result: Any, fallback_seconds: float) -> None:
     """Copy TTS/playback timing returned by playback.speak_response into a turn record."""
+    # ``speak_response`` now returns a dict, but older tests/doubles may still
+    # return ``None``. Keep a coarse end-to-end speak duration in that case.
     turn_timing["speak_seconds"] = fallback_seconds
     if not isinstance(speak_result, dict):
         return
@@ -85,6 +99,8 @@ def _publish_turn_timing(
     archive_turns: List[Dict[str, Any]],
 ) -> None:
     """Expose the latest turn timing to the popup and durable activation archive."""
+    # Copy before publishing so subsequent mutations cannot silently change the
+    # snapshot shown in the popup or written into the archive JSON.
     stable_timing = dict(turn_timing)
     turn_timings.append(stable_timing)
     update_visualization_state(
@@ -101,11 +117,23 @@ def _publish_turn_timing(
 
 
 def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
+    """Run one wake-triggered voice session and return its terminal outcome.
+
+    Timing model:
+    - ``voice_session_timing`` covers the detector-to-handler boundary. It uses
+      wall-clock seconds because the wake detector already records
+      ``detected_at`` as ``time.time()``.
+    - Per-turn phase timings use ``time.monotonic()`` because they measure work
+      inside this process and should not move if the system clock jumps.
+    """
     if isinstance(activation, dict):
         probability = float(activation.get("probability") or 0.0)
     else:
         probability = float(activation)
         activation = {"probability": probability, "scores": [probability], "detected_at": time.time()}
+    # ``detected_at`` is wall-clock detector metadata. Keep wall time only for
+    # wake-to-handle/wake-to-record measurements; use monotonic clocks after
+    # control enters this handler.
     activation_detected_at = float(activation.get("detected_at") or time.time())
     handle_started_at = time.time()
     voice_session_timing = {
@@ -147,6 +175,9 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
     while not STOP.is_set() and turn_index <= max_turns:
         first_turn = turn_index == 1
         turn_started = time.monotonic()
+        # Built incrementally as the request moves through record -> STT ->
+        # router -> answer -> TTS/playback, then published once the turn has a
+        # response or close acknowledgement.
         turn_timing: Dict[str, Any] = {"turn": turn_index}
         record_message = (
             "record: wakeword detected; recording your request now…"
@@ -173,6 +204,8 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
 
         record_started = time.monotonic()
         record_wall_started = time.time()
+        # This is the only per-turn field that intentionally crosses the
+        # detector/handler boundary, so it shares the detector's wall clock.
         turn_timing["wake_to_record_start_seconds"] = max(0.0, record_wall_started - activation_detected_at)
         command_path = record_command(command_recording_config_for_turn(cfg, turn_index), cancel_check=voice_cancel_requested)
         turn_timing["record_seconds"] = _elapsed_seconds(record_started)
@@ -262,6 +295,9 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
 
         if conversation_enabled and is_close_transcript(transcript, cfg):
             ack = str(cfg.get("conversation_close_ack") or "").strip()
+            # A close phrase skips the router and Hermes answer path by design.
+            # Store explicit zeroes so archive consumers can rely on a stable
+            # per-turn schema instead of treating missing keys as special cases.
             turn_timing["route_seconds"] = 0.0
             turn_timing["answer_seconds"] = 0.0
             archive_turns.append({
@@ -275,6 +311,8 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
                 append_visualization_turn(visual_state, transcript=transcript, response=ack)
 
                 def publish_close_speech_stage(stage: str) -> None:
+                    # ``speak_response`` owns the real TTS/playback boundary;
+                    # this callback mirrors that boundary into popup state.
                     message = (
                         "TTS: generating the close acknowledgement…"
                         if stage == "tts"
@@ -397,6 +435,9 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
             append_visualization_turn(visual_state, transcript=transcript, response=response)
 
             def publish_speech_stage(stage: str) -> None:
+                # Keep popup stage transitions tied to the playback helper, not
+                # guessed here, so failures/cancellations are attributed to the
+                # phase that was actually running.
                 message = (
                     "TTS: Hermes answered; generating spoken audio…"
                     if stage == "tts"
