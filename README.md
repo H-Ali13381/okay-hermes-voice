@@ -227,6 +227,28 @@ Activation archives are local, but they can contain private speech. Do not publi
 
 Also remember that voice requests can use the same Hermes tools as your normal CLI sessions. Treat this like giving your local assistant a microphone, not like installing a harmless sound widget.
 
+## Phase 0 latency summaries
+
+Activation archives now include Phase 0 timing metadata for completed turns. To summarize the local archive without starting the daemon:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary
+```
+
+To summarize a specific archive directory:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations
+```
+
+For scripts or benchmark comparisons, emit JSON:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations --summary-json
+```
+
+The summary reports archive count, turn count, status/cancel counts, response-source counts, and per-stage timing statistics such as recording, STT, routing, answer generation, TTS, playback, and total turn time. If archive metadata is tagged with `benchmark_preset` and `benchmark_category`, the same metrics are grouped by preset so repeated task runs can be compared before and after later changes.
+
 ## Troubleshooting
 
 ### Nothing happens when I say "Okay Hermes"
@@ -388,7 +410,8 @@ PYTHON=/path/to/python ./scripts/install_user_service.sh
 ```bash
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --smoke-test
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --list-devices
-~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations --summary-json
+~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/activation_archive.py src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
 PYTHONPATH=src ~/.hermes/hermes-agent/venv/bin/python -m pytest -q
 ```
 

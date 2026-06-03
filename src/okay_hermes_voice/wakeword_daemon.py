@@ -38,7 +38,9 @@ from .activation_archive import (
     _activation_timestamp,
     archive_command_audio,
     command_audio_metadata_fields,
+    format_activation_latency_summary,
     save_activation_archive,
+    summarize_activation_archives,
     update_activation_archive_metadata,
 )
 from .activation_flow import handle_activation
@@ -150,11 +152,29 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--config", default=str(CONFIG_PATH), help="Path to wakeword config YAML")
     parser.add_argument("--smoke-test", action="store_true", help="Load ONNX model and run zero-audio inference, then exit")
     parser.add_argument("--visualization-test", metavar="TEXT", help="Open the popup visualizer with a fake transcript, then exit")
+    parser.add_argument("--activation-summary", nargs="?", const="", metavar="DIR", help="Print Phase 0 latency summary from activation archive JSON files, then exit")
+    parser.add_argument("--summary-json", action="store_true", help="Print activation summary as JSON instead of terminal text")
     parser.add_argument("--list-devices", action="store_true", help="Print PortAudio devices, then exit")
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    if args.activation_summary is not None and args.activation_summary:
+        summary = summarize_activation_archives(Path(args.activation_summary).expanduser())
+        if args.summary_json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        else:
+            print(format_activation_latency_summary(summary), end="")
+        return 0
+
     cfg = load_config(Path(args.config).expanduser())
+    if args.activation_summary is not None:
+        summary_dir = Path(str(cfg.get("activation_archive_dir") or DEFAULT_CONFIG["activation_archive_dir"])).expanduser()
+        summary = summarize_activation_archives(summary_dir)
+        if args.summary_json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        else:
+            print(format_activation_latency_summary(summary), end="")
+        return 0
     if args.list_devices:
         return list_devices()
     if args.smoke_test:
