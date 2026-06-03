@@ -5,6 +5,7 @@ import json
 import pytest
 
 from okay_hermes_voice import activation_flow as flow
+from okay_hermes_voice import activation_stages as stages
 from okay_hermes_voice import interaction_router as router
 from okay_hermes_voice import voice_activation_popup as popup
 from okay_hermes_voice import wakeword_daemon as wake
@@ -139,7 +140,7 @@ def test_handle_activation_updates_popup_pipeline_stages(monkeypatch, tmp_path):
     state_path = tmp_path / "voice_state.json"
     command_path = tmp_path / "command.wav"
     command_path.write_bytes(b"fake wav")
-    stages = []
+    observed_stages = []
 
     original_update = flow.update_visualization_state
 
@@ -149,8 +150,8 @@ def test_handle_activation_updates_popup_pipeline_stages(monkeypatch, tmp_path):
             return
         state = json.loads(state_path.read_text(encoding="utf-8"))
         stage = state.get("pipeline_stage")
-        if stage and (not stages or stages[-1] != stage):
-            stages.append(stage)
+        if stage and (not observed_stages or observed_stages[-1] != stage):
+            observed_stages.append(stage)
 
     def fake_launch_visualization(_cfg, probability):
         capture_update(
@@ -173,6 +174,7 @@ def test_handle_activation_updates_popup_pipeline_stages(monkeypatch, tmp_path):
 
     flow.STOP.clear()
     monkeypatch.setattr(flow, "update_visualization_state", capture_update)
+    monkeypatch.setattr(stages, "update_visualization_state", capture_update)
     monkeypatch.setattr(flow, "save_activation_archive", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(flow, "launch_visualization", fake_launch_visualization)
     monkeypatch.setattr(flow, "maybe_beep", lambda *_args, **_kwargs: None)
@@ -186,7 +188,7 @@ def test_handle_activation_updates_popup_pipeline_stages(monkeypatch, tmp_path):
     result = flow.handle_activation({"conversation_mode_enabled": False}, {"probability": 0.9})
 
     assert result == flow.VOICE_SESSION_COMPLETED
-    assert stages[:7] == ["wake", "record", "transcript", "route", "answer", "tts", "playback"]
+    assert observed_stages[:7] == ["wake", "record", "transcript", "route", "answer", "tts", "playback"]
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["status"] == "done"
     assert state["pipeline_stage"] == "playback"
