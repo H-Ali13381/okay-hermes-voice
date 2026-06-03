@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from pathlib import Path
 
 from okay_hermes_voice import voice_activation_popup as popup
@@ -62,6 +63,46 @@ def test_popup_ctrl_c_request_marks_state_for_daemon_cancel(tmp_path):
     assert state["cancel_reason"] == "ctrl_c"
     assert state["status"] == "cancel_requested"
     assert "cancel_requested_at" in state
+
+
+def test_launch_visualization_initializes_wake_pipeline_stage(monkeypatch, tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    monkeypatch.setattr(viz, "_visualization_state_path", lambda: state_path)
+
+    launched = viz.launch_visualization(
+        {
+            "visualization_enabled": True,
+            "visualization_terminal": "off",
+            "visualization_title": "Hermes Voice",
+            "visualization_keep_open_seconds": 45.0,
+        },
+        probability=0.91,
+    )
+
+    assert launched == state_path
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "wake"
+    assert state["pipeline_stage"] == "wake"
+    assert "wake" in state["message"].casefold()
+
+
+def test_popup_render_shows_voice_pipeline_progress():
+    rendered = popup.render(
+        {
+            "title": "Hermes Voice",
+            "status": "answer",
+            "pipeline_stage": "answer",
+            "message": "Hermes is producing the answer.",
+            "activated_at": 1,
+            "updated_at": 2,
+        },
+        tick=0,
+        final_seen_at=None,
+    )
+
+    assert "Pipeline" in rendered
+    for label in ("wake", "record", "transcript", "route", "answer", "TTS", "playback"):
+        assert label in rendered
 
 
 def test_popup_state_fingerprint_ignores_metadata_that_is_not_rendered():
@@ -288,29 +329,25 @@ def test_popup_run_redraws_when_scroll_key_changes_viewport_without_state_change
     assert "response line 30" in frame_writes[1]
 
 
-def test_popup_run_only_redraws_when_state_changes_so_scrollback_stays_scrollable(monkeypatch, tmp_path):
+def test_popup_run_redraws_active_spinner_without_waiting_for_state_change(monkeypatch, tmp_path):
     state_path = tmp_path / "voice_state.json"
-    listening_state = {
+    active_state = {
         "title": "Hermes Voice",
-        "status": "listening",
-        "message": "Listening for a follow-up. Scrollback should stay still while this state is unchanged.",
+        "status": "answer",
+        "pipeline_stage": "answer",
+        "message": "answer: Hermes is producing the response…",
         "activated_at": 1,
         "updated_at": 2,
-        "keep_open_seconds": 0.2,
+        "keep_open_seconds": 0.1,
     }
     done_state = {
-        **listening_state,
+        **active_state,
         "status": "done",
         "message": "Voice request complete.",
         "turns": [{"transcript": "Summarize", "response": "Long response " * 80}],
         "updated_at": 3,
     }
-    states = [
-        listening_state,
-        {**listening_state, "updated_at": 3, "activation_archive": {"path": "/tmp/archive"}},
-        {**listening_state, "updated_at": 4, "visualization_terminal": "kitty"},
-        done_state,
-    ]
+    states = [active_state, active_state, active_state, done_state]
     load_calls = {"count": 0}
 
     def fake_load_state(_path):
@@ -343,9 +380,16 @@ def test_popup_run_only_redraws_when_state_changes_so_scrollback_stays_scrollabl
     assert popup.run(state_path) == 0
 
     frame_writes = [write for write in captured_stdout.writes if write.startswith("\033[2J\033[H")]
-    assert len(frame_writes) == 2
-    assert "Listening for a follow-up" in frame_writes[0]
-    assert "Long response" in frame_writes[1]
+    active_status_lines = [
+        next(line for line in frame.splitlines() if "Hermes responding" in line)
+        for frame in frame_writes
+        if "Hermes responding" in frame
+    ]
+    assert len(active_status_lines) >= 3
+    assert "⠋" in active_status_lines[0]
+    assert "⠙" in active_status_lines[1]
+    assert "⠹" in active_status_lines[2]
+    assert "Long response" in frame_writes[-1]
 
 
 def test_visualization_terminal_auto_prefers_kitty_even_on_kde(monkeypatch, tmp_path):
@@ -462,6 +506,118 @@ def test_launch_visualization_falls_back_when_first_terminal_fails(monkeypatch, 
 
     assert result == state_path
     assert launched == ["/usr/bin/kitty", "/usr/bin/konsole"]
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["visualization_terminal"] == "konsole"
+    assert state["visualization_launch_error"] == ""
+
+
+def test_launch_visualization_infers_wayland_display_for_systemd_service_env(monkeypatch, tmp_path):
+    script = tmp_path / "popup.py"
+    script.write_text("print('popup')", encoding="utf-8")
+    state_path = tmp_path / "voice_state.json"
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    wayland_socket = runtime_dir / "wayland-0"
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(wayland_socket))
+    captured_env = {}
+
+    monkeypatch.setattr(viz, "_visualization_state_path", lambda: state_path)
+    monkeypatch.setattr(viz.shutil, "which", lambda name: "/usr/bin/kitty" if name == "kitty" else None)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+
+    class FakeProc:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            raise TimeoutError
+
+    def fake_popen(_cmd, **kwargs):
+        captured_env.update(kwargs["env"])
+        return FakeProc()
+
+    try:
+        monkeypatch.setattr(viz.subprocess, "Popen", fake_popen)
+
+        result = viz.launch_visualization(
+            {
+                "visualization_enabled": True,
+                "visualization_terminal": "kitty",
+                "visualization_title": "Hermes Voice",
+                "visualization_script": str(script),
+                "visualization_keep_open_seconds": 45.0,
+            },
+            probability=0.9,
+        )
+    finally:
+        sock.close()
+
+    assert result == state_path
+    assert captured_env["WAYLAND_DISPLAY"] == "wayland-0"
+    assert captured_env["XDG_SESSION_TYPE"] == "wayland"
+
+
+def test_launch_visualization_falls_back_when_terminal_exits_after_grace(monkeypatch, tmp_path):
+    script = tmp_path / "popup.py"
+    script.write_text("print('popup')", encoding="utf-8")
+    state_path = tmp_path / "voice_state.json"
+    launched = []
+
+    monkeypatch.setattr(viz, "_visualization_state_path", lambda: state_path)
+    monkeypatch.setattr(
+        viz.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in {"kitty", "konsole"} else None,
+    )
+
+    class DelayedFailProc:
+        returncode = 1
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            return "", "GLFW initialization failed"
+
+    class AliveProc:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            raise TimeoutError
+
+    def fake_popen(cmd, **_kwargs):
+        launched.append(Path(cmd[0]).name)
+        if Path(cmd[0]).name == "kitty":
+            return DelayedFailProc()
+        return AliveProc()
+
+    monkeypatch.setattr(viz.subprocess, "Popen", fake_popen)
+
+    result = viz.launch_visualization(
+        {
+            "visualization_enabled": True,
+            "visualization_terminal": "auto",
+            "visualization_title": "Hermes Voice",
+            "visualization_script": str(script),
+            "visualization_keep_open_seconds": 45.0,
+        },
+        probability=0.9,
+    )
+
+    assert result == state_path
+    assert launched == ["kitty", "konsole"]
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["visualization_terminal"] == "konsole"
     assert state["visualization_launch_error"] == ""

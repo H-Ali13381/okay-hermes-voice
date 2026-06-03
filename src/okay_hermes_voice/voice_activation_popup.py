@@ -23,7 +23,24 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 FINAL_STATUSES = {"done", "error", "cancelled"}
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+PIPELINE_STAGES = (
+    ("wake", "wake"),
+    ("record", "record"),
+    ("transcript", "transcript"),
+    ("route", "route"),
+    ("answer", "answer"),
+    ("tts", "TTS"),
+    ("playback", "playback"),
+)
+PIPELINE_STAGE_INDEX = {stage: idx for idx, (stage, _label) in enumerate(PIPELINE_STAGES)}
 STATUS_LABELS = {
+    "wake": "wake · wakeword detected",
+    "record": "record · recording request",
+    "transcript": "transcript · speech to text",
+    "route": "route · choosing handler",
+    "answer": "answer · Hermes responding",
+    "tts": "TTS · generating speech",
+    "playback": "playback · playing response",
     "listening": "Listening for your request",
     "transcribing": "Transcribing speech",
     "thinking": "Hermes is thinking",
@@ -34,6 +51,13 @@ STATUS_LABELS = {
     "cancelled": "Cancelled",
 }
 STATUS_COLORS = {
+    "wake": "\033[36m",
+    "record": "\033[36m",
+    "transcript": "\033[35m",
+    "route": "\033[33m",
+    "answer": "\033[33m",
+    "tts": "\033[32m",
+    "playback": "\033[32m",
     "listening": "\033[36m",
     "transcribing": "\033[35m",
     "thinking": "\033[33m",
@@ -210,10 +234,30 @@ def render_header_lines(state: Dict[str, Any], tick: int, width: int) -> List[st
     ]
 
 
+def render_pipeline_lines(state: Dict[str, Any]) -> List[str]:
+    stage = str(state.get("pipeline_stage") or state.get("status") or "")
+    if stage not in PIPELINE_STAGE_INDEX:
+        return []
+    current_index = PIPELINE_STAGE_INDEX[stage]
+    done = str(state.get("status") or "") == "done"
+    parts = []
+    for idx, (stage_id, label) in enumerate(PIPELINE_STAGES):
+        if done or idx < current_index:
+            parts.append(f"\033[32m✓ {label}{RESET}")
+        elif idx == current_index:
+            color = STATUS_COLORS.get(stage_id, "")
+            parts.append(f"{BOLD}{color}● {label}{RESET}")
+        else:
+            parts.append(f"{DIM}○ {label}{RESET}")
+    return ["", f"{BOLD}\033[34mPipeline{RESET}", "  " + " → ".join(parts)]
+
+
 def render_body_lines(state: Dict[str, Any], width: int) -> List[str]:
     status = str(state.get("status") or "listening")
     color = STATUS_COLORS.get(status, "")
     lines: List[str] = []
+
+    lines.extend(render_pipeline_lines(state))
 
     message = state.get("message")
     if message:
@@ -404,6 +448,7 @@ def run(path: Path) -> int:
     final_seen_at: float | None = None
     last_rendered_fingerprint: str | None = None
     last_rendered_scroll_offset: int | None = None
+    last_rendered_spinner_frame: int | None = None
     scroll_offset = 0
     tick = 0
     stdin_fd: int | None = None
@@ -432,15 +477,22 @@ def run(path: Path) -> int:
 
             # Repainting identical frames every poll makes kitty keep jumping to the
             # bottom and fills scrollback with duplicate dashboards. Poll often, but
-            # only write when the daemon-published visible state or the TUI viewport
-            # changes. The alternate screen keeps full-frame redraws out of normal
-            # scrollback; the viewport makes long output scroll inside the popup.
+            # only write when the daemon-published visible state, the TUI viewport,
+            # or the active-state spinner frame changes. The alternate screen keeps
+            # full-frame redraws out of normal scrollback; the viewport makes long
+            # output scroll inside the popup.
             frame, clamped_scroll_offset, _max_scroll = render_frame(state, tick, final_seen_at, scroll_offset)
-            if fingerprint != last_rendered_fingerprint or clamped_scroll_offset != last_rendered_scroll_offset:
+            spinner_frame = tick % len(SPINNER) if status not in FINAL_STATUSES else None
+            if (
+                fingerprint != last_rendered_fingerprint
+                or clamped_scroll_offset != last_rendered_scroll_offset
+                or spinner_frame != last_rendered_spinner_frame
+            ):
                 sys.stdout.write(frame)
                 sys.stdout.flush()
                 last_rendered_fingerprint = fingerprint
                 last_rendered_scroll_offset = clamped_scroll_offset
+                last_rendered_spinner_frame = spinner_frame
             scroll_offset = clamped_scroll_offset
 
             if final_seen_at is not None:
