@@ -159,10 +159,10 @@ Raise the wake threshold above the default `0.6973556280136108`:
 threshold: 0.75
 ```
 
-You can also require more repeated wake detections before it triggers:
+By default, Hermes now triggers on one positive wake window for lower latency. To trade speed for fewer false wakes, require repeated wake detections before activation:
 
 ```yaml
-trigger_consecutive_windows: 3
+trigger_consecutive_windows: 2
 ```
 
 Restart after editing:

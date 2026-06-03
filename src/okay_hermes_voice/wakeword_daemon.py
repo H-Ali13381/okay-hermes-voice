@@ -43,7 +43,7 @@ from .activation_archive import (
     summarize_activation_archives,
     update_activation_archive_metadata,
 )
-from .activation_flow import handle_activation
+from .activation_flow import VOICE_SESSION_CANCELLED, handle_activation
 from .audio_io import (
     _cancel_check_requested,
     float_waveform_to_int16,
@@ -147,6 +147,23 @@ from .voice_routing import (
 
 
 
+def post_activation_cooldown_seconds(cfg: Dict[str, Any], session_result: Any) -> float:
+    """Return the re-arm delay after a voice activation completes."""
+    if session_result == VOICE_SESSION_CANCELLED:
+        raw = cfg.get("cancel_cooldown_seconds")
+        if raw is None or raw == "":
+            raw = DEFAULT_CONFIG.get("cancel_cooldown_seconds", 0.0)
+    else:
+        raw = cfg.get("cooldown_seconds")
+        if raw is None or raw == "":
+            raw = DEFAULT_CONFIG.get("cooldown_seconds", 2.5)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.0 if session_result == VOICE_SESSION_CANCELLED else float(DEFAULT_CONFIG.get("cooldown_seconds", 2.5))
+
+
+
 def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Always-on Okay Hermes wakeword daemon")
     parser.add_argument("--config", default=str(CONFIG_PATH), help="Path to wakeword config YAML")
@@ -196,8 +213,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             activation = wait_for_wake(cfg, session, input_name, output_name)
             if STOP.is_set() or activation is None:
                 break
-            handle_activation(cfg, activation)
-            cooldown = float(cfg.get("cooldown_seconds") or 2.5)
+            session_result = handle_activation(cfg, activation)
+            cooldown = post_activation_cooldown_seconds(cfg, session_result)
             if cooldown > 0:
                 LOG.info("Cooldown %.1fs", cooldown)
                 STOP.wait(cooldown)

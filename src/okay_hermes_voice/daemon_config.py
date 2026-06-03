@@ -19,9 +19,10 @@ CONFIG_PATH = HERMES_HOME / "wakeword" / "config.yaml"
 DEFAULT_CONFIG: Dict[str, Any] = {
     "model_path": str(HERMES_HOME / "wakeword" / "okay-hermes-repcnn-onnx" / "wakeword.onnx"),
     "threshold": 0.6973556280136108,
-    "trigger_consecutive_windows": 2,
+    "trigger_consecutive_windows": 1,
     "inference_interval_seconds": 0.25,
     "cooldown_seconds": 2.5,
+    "cancel_cooldown_seconds": 0.0,
     "sample_rate": 16000,
     "window_seconds": 3.0,
     "block_seconds": 0.1,

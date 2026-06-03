@@ -3,9 +3,10 @@
 
 model_path: ~/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx
 threshold: 0.6973556280136108
-trigger_consecutive_windows: 2
+trigger_consecutive_windows: 1
 inference_interval_seconds: 0.5
 cooldown_seconds: 2.5
+cancel_cooldown_seconds: 0.0  # re-arm immediately after Ctrl-C popup cancellation
 sample_rate: 16000
 window_seconds: 3.0
 block_seconds: 0.1

@@ -5,6 +5,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from okay_hermes_voice import activation_archive as archive_mod
 from okay_hermes_voice import daemon_config
@@ -19,6 +20,17 @@ def test_default_wakeword_model_matches_public_artifact():
         "okay-hermes-repcnn-onnx/wakeword.onnx"
     )
     assert daemon_config.DEFAULT_CONFIG["threshold"] == 0.6973556280136108
+
+def test_default_wakeword_activation_requires_one_positive_window():
+    assert daemon_config.DEFAULT_CONFIG["trigger_consecutive_windows"] == 1
+
+
+def test_example_config_uses_one_positive_wake_window():
+    repo_root = Path(__file__).parents[2]
+    example_cfg = yaml.safe_load((repo_root / "config.example.yaml").read_text(encoding="utf-8"))
+
+    assert example_cfg["trigger_consecutive_windows"] == 1
+
 
 def test_save_activation_archive_writes_wake_clip_and_metadata(tmp_path):
     cfg = {
