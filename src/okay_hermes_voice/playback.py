@@ -237,7 +237,17 @@ def speak_response(
     cancel_check: Optional[Callable[[], bool]] = None,
     stage_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
+    """Generate TTS, play it, and return phase timing metadata.
+
+    The returned dictionary is deliberately stable: skipped/failed phases keep
+    their success flags false and durations at zero, so archive readers can tell
+    whether a turn stopped during TTS generation or during audio playback.
+    ``stage_callback`` is observability only; callback failures must not stop
+    speech from being generated or played.
+    """
     started = time.monotonic()
+    # Seed every key up front so callers do not need to branch on missing fields
+    # when TTS is disabled, generation fails, or playback is cancelled.
     timing: Dict[str, Any] = {
         "tts_enabled": bool(cfg.get("tts_enabled", True)),
         "tts_success": False,
@@ -249,12 +259,16 @@ def speak_response(
     }
 
     def finish() -> Dict[str, Any]:
+        # End-to-end speaking time includes both TTS generation and playback,
+        # even on early returns such as disabled TTS or malformed provider JSON.
         timing["speak_seconds"] = max(0.0, time.monotonic() - started)
         return timing
 
     def notify_stage(stage: str) -> None:
         if stage_callback is None:
             return
+        # Popup/archive observability is useful but never important enough to
+        # prevent the user from hearing a response.
         try:
             stage_callback(stage)
         except Exception as exc:
@@ -269,6 +283,8 @@ def speak_response(
         spoken = spoken[:max_chars].rstrip() + "… The full response is in the wakeword log."
     LOG.info("Generating TTS (%d chars)", len(spoken))
     notify_stage("tts")
+    # Measure the provider call separately from local playback so slow network
+    # TTS and slow audio output show up as different failure modes.
     tts_started = time.monotonic()
     result_raw = text_to_speech_tool(spoken)
     timing["tts_seconds"] = max(0.0, time.monotonic() - tts_started)
@@ -288,6 +304,9 @@ def speak_response(
     timing["tts_file_path"] = str(file_path)
     LOG.info("Playing TTS: %s", file_path)
     notify_stage("playback")
+    # Playback can be local PipeWire/Pulse or the Hermes fallback helper; keep
+    # it distinct from TTS generation so archive summaries point at the right
+    # layer.
     playback_started = time.monotonic()
     ok = play_tts_file(cfg, str(file_path), cancel_check=cancel_check)
     timing["playback_seconds"] = max(0.0, time.monotonic() - playback_started)
