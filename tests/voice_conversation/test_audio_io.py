@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import types
 
 import numpy as np
@@ -120,3 +121,57 @@ def test_play_tts_file_terminates_player_when_cancel_requested(monkeypatch):
 
     assert ok is False
     assert fake_proc.terminated is True
+
+
+def test_speak_response_returns_generation_and_playback_timing(monkeypatch):
+    clock = {"now": 10.0}
+    calls = []
+
+    def fake_monotonic():
+        return clock["now"]
+
+    def fake_text_to_speech_tool(text):
+        calls.append(("tts", text))
+        clock["now"] += 0.25
+        return json.dumps({"success": True, "file_path": "/tmp/response.wav"})
+
+    def fake_play_tts_file(cfg, file_path, cancel_check=None):
+        calls.append(("play", file_path, bool(cancel_check and cancel_check())))
+        clock["now"] += 0.75
+        return True
+
+    monkeypatch.setattr(playback.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(playback, "text_to_speech_tool", fake_text_to_speech_tool)
+    monkeypatch.setattr(playback, "play_tts_file", fake_play_tts_file)
+
+    timing = playback.speak_response(
+        {"tts_enabled": True, "max_spoken_response_chars": 2500},
+        "spoken answer",
+        cancel_check=lambda: False,
+    )
+
+    assert calls == [("tts", "spoken answer"), ("play", "/tmp/response.wav", False)]
+    assert timing["tts_success"] is True
+    assert timing["playback_success"] is True
+    assert timing["tts_seconds"] == 0.25
+    assert timing["playback_seconds"] == 0.75
+    assert timing["speak_seconds"] == 1.0
+    assert timing["tts_file_path"] == "/tmp/response.wav"
+
+
+def test_speak_response_notifies_tts_and_playback_stage_callbacks(monkeypatch):
+    monkeypatch.setattr(playback, "text_to_speech_tool", lambda _text: json.dumps({"success": True, "file_path": "/tmp/response.wav"}))
+    monkeypatch.setattr(playback, "play_tts_file", lambda *_args, **_kwargs: True)
+
+    stages = []
+
+    timing = playback.speak_response(
+        {"tts_enabled": True, "max_spoken_response_chars": 2500},
+        "spoken answer",
+        cancel_check=lambda: False,
+        stage_callback=stages.append,
+    )
+
+    assert stages == ["tts", "playback"]
+    assert timing["tts_success"] is True
+    assert timing["playback_success"] is True

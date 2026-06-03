@@ -30,16 +30,95 @@ from .voice_routing import (
     routed_request_status_message,
 )
 
+VOICE_SESSION_COMPLETED = "completed"
+VOICE_SESSION_CANCELLED = "cancelled"
 
-def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
+PIPELINE_STAGE_MESSAGES = {
+    "record": "record: recording your request now…",
+    "transcript": "transcript: speech captured; converting it to text…",
+    "route": "route: choosing the right handler for this request…",
+    "answer": "answer: Hermes is producing the response…",
+    "tts": "TTS: generating spoken audio…",
+    "playback": "playback: playing the spoken response…",
+}
+
+
+def _publish_pipeline_stage(visual_state: Any, stage: str, message: str | None = None, **updates: Any) -> None:
+    """Publish a descriptive, user-visible voice pipeline stage to the popup."""
+    update_visualization_state(
+        visual_state,
+        status=stage,
+        pipeline_stage=stage,
+        message=message or PIPELINE_STAGE_MESSAGES.get(stage, stage),
+        **updates,
+    )
+
+
+def _elapsed_seconds(started: float) -> float:
+    """Return a monotonic non-negative elapsed duration for observability fields."""
+    return max(0.0, time.monotonic() - started)
+
+
+def _merge_speak_timing(turn_timing: Dict[str, Any], speak_result: Any, fallback_seconds: float) -> None:
+    """Copy TTS/playback timing returned by playback.speak_response into a turn record."""
+    turn_timing["speak_seconds"] = fallback_seconds
+    if not isinstance(speak_result, dict):
+        return
+    for key in (
+        "tts_enabled",
+        "tts_success",
+        "playback_success",
+        "tts_seconds",
+        "playback_seconds",
+        "speak_seconds",
+        "tts_file_path",
+    ):
+        if key in speak_result:
+            turn_timing[key] = speak_result[key]
+
+
+def _publish_turn_timing(
+    visual_state: Any,
+    activation_archive: Any,
+    turn_timings: List[Dict[str, Any]],
+    turn_timing: Dict[str, Any],
+    archive_turns: List[Dict[str, Any]],
+) -> None:
+    """Expose the latest turn timing to the popup and durable activation archive."""
+    stable_timing = dict(turn_timing)
+    turn_timings.append(stable_timing)
+    update_visualization_state(
+        visual_state,
+        latest_turn_timing=stable_timing,
+        turn_timings=turn_timings,
+    )
+    update_activation_archive_metadata(
+        activation_archive,
+        latest_turn_timing=stable_timing,
+        turn_timings=turn_timings,
+        turns=archive_turns,
+    )
+
+
+def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
     if isinstance(activation, dict):
         probability = float(activation.get("probability") or 0.0)
     else:
         probability = float(activation)
         activation = {"probability": probability, "scores": [probability], "detected_at": time.time()}
+    activation_detected_at = float(activation.get("detected_at") or time.time())
+    handle_started_at = time.time()
+    voice_session_timing = {
+        "schema_version": 1,
+        "activation_detected_at": activation_detected_at,
+        "handle_started_at": handle_started_at,
+        "wake_to_handle_seconds": max(0.0, handle_started_at - activation_detected_at),
+    }
     LOG.info("Handling wake activation; probability=%.6f", probability)
     activation_archive = save_activation_archive(cfg, activation)
     visual_state = launch_visualization(cfg, probability)
+    update_visualization_state(visual_state, voice_session_timing=voice_session_timing)
+    update_activation_archive_metadata(activation_archive, voice_session_timing=voice_session_timing)
     if activation_archive:
         update_visualization_state(visual_state, activation_archive=activation_archive)
     maybe_beep(cfg, frequency=880, count=1)
@@ -48,6 +127,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
     max_turns = max(1, int(cfg.get("conversation_max_turns") or 50))
     turn_index = 1
     archive_turns: List[Dict[str, Any]] = []
+    turn_timings: List[Dict[str, Any]] = []
     hermes_history: List[Dict[str, Any]] = []
 
     def voice_cancel_requested() -> bool:
@@ -66,15 +146,17 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
 
     while not STOP.is_set() and turn_index <= max_turns:
         first_turn = turn_index == 1
-        listening_message = (
-            "Wakeword detected. Listening for your request…"
+        turn_started = time.monotonic()
+        turn_timing: Dict[str, Any] = {"turn": turn_index}
+        record_message = (
+            "record: wakeword detected; recording your request now…"
             if first_turn
-            else "Listening for a follow-up. Say “close” to end voice mode."
+            else "record: recording a follow-up. Say “close” to end voice mode."
         )
-        update_visualization_state(
+        _publish_pipeline_stage(
             visual_state,
-            status="listening",
-            message=listening_message,
+            "record",
+            record_message,
             current_turn=turn_index,
             error="",
         )
@@ -87,11 +169,15 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             maybe_beep(cfg, frequency=660, count=1)
 
         if stop_if_cancelled():
-            return
+            return VOICE_SESSION_CANCELLED
 
+        record_started = time.monotonic()
+        record_wall_started = time.time()
+        turn_timing["wake_to_record_start_seconds"] = max(0.0, record_wall_started - activation_detected_at)
         command_path = record_command(command_recording_config_for_turn(cfg, turn_index), cancel_check=voice_cancel_requested)
+        turn_timing["record_seconds"] = _elapsed_seconds(record_started)
         if stop_if_cancelled():
-            return
+            return VOICE_SESSION_CANCELLED
         if not command_path:
             if first_turn or not conversation_enabled:
                 update_visualization_state(
@@ -107,7 +193,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                     turns=archive_turns,
                 )
                 maybe_beep(cfg, frequency=330, count=2)
-                return
+                return VOICE_SESSION_COMPLETED
             update_visualization_state(
                 visual_state,
                 status="listening",
@@ -124,10 +210,10 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             continue
 
         archived_command_path = archive_command_audio(cfg, activation_archive, command_path, turn_index)
-        update_visualization_state(
+        _publish_pipeline_stage(
             visual_state,
-            status="transcribing",
-            message="Speech captured. Transcribing now…",
+            "transcript",
+            "transcript: speech captured; converting it to text…",
             current_turn=turn_index,
         )
         update_activation_archive_metadata(
@@ -136,9 +222,11 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             current_turn=turn_index,
             **command_audio_metadata_fields(archived_command_path, command_path, latest=True),
         )
+        transcribe_started = time.monotonic()
         transcript = transcribe_command(command_path)
+        turn_timing["transcribe_seconds"] = _elapsed_seconds(transcribe_started)
         if stop_if_cancelled():
-            return
+            return VOICE_SESSION_CANCELLED
         if not transcript:
             if first_turn or not conversation_enabled:
                 update_visualization_state(
@@ -155,7 +243,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                     turns=archive_turns,
                 )
                 maybe_beep(cfg, frequency=330, count=2)
-                return
+                return VOICE_SESSION_COMPLETED
             update_visualization_state(
                 visual_state,
                 status="listening",
@@ -174,6 +262,8 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
 
         if conversation_enabled and is_close_transcript(transcript, cfg):
             ack = str(cfg.get("conversation_close_ack") or "").strip()
+            turn_timing["route_seconds"] = 0.0
+            turn_timing["answer_seconds"] = 0.0
             archive_turns.append({
                 "turn": turn_index,
                 "transcript": transcript,
@@ -183,15 +273,37 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             })
             if ack:
                 append_visualization_turn(visual_state, transcript=transcript, response=ack)
-                update_visualization_state(
-                    visual_state,
-                    status="speaking",
-                    message="Closing voice mode…",
-                    transcript=transcript,
-                    response=ack,
-                    error="",
+
+                def publish_close_speech_stage(stage: str) -> None:
+                    message = (
+                        "TTS: generating the close acknowledgement…"
+                        if stage == "tts"
+                        else "playback: playing the close acknowledgement…"
+                    )
+                    _publish_pipeline_stage(
+                        visual_state,
+                        stage,
+                        message,
+                        transcript=transcript,
+                        response=ack,
+                        error="",
+                        current_turn=turn_index,
+                    )
+
+                speak_started = time.monotonic()
+                speak_result = speak_response(
+                    cfg,
+                    ack,
+                    cancel_check=voice_cancel_requested,
+                    stage_callback=publish_close_speech_stage,
                 )
-                speak_response(cfg, ack, cancel_check=voice_cancel_requested)
+                _merge_speak_timing(turn_timing, speak_result, _elapsed_seconds(speak_started))
+            else:
+                turn_timing["speak_seconds"] = 0.0
+            turn_timing["turn_seconds"] = _elapsed_seconds(turn_started)
+            if archive_turns:
+                archive_turns[-1]["timings"] = dict(turn_timing)
+            _publish_turn_timing(visual_state, activation_archive, turn_timings, turn_timing, archive_turns)
             update_visualization_state(
                 visual_state,
                 status="done",
@@ -208,16 +320,27 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                 turns=archive_turns,
             )
             LOG.info("Voice conversation closed by transcript: %r", transcript)
-            return
+            return VOICE_SESSION_COMPLETED
 
-        interaction_plan = route_transcribed_request(cfg, transcript, cancel_check=voice_cancel_requested)
-        if stop_if_cancelled():
-            return
-
-        update_visualization_state(
+        _publish_pipeline_stage(
             visual_state,
-            status="thinking",
-            message=routed_request_status_message(interaction_plan),
+            "route",
+            "route: transcript ready; choosing the right handler…",
+            transcript=transcript,
+            response="",
+            error="",
+            current_turn=turn_index,
+        )
+        route_started = time.monotonic()
+        interaction_plan = route_transcribed_request(cfg, transcript, cancel_check=voice_cancel_requested)
+        turn_timing["route_seconds"] = _elapsed_seconds(route_started)
+        if stop_if_cancelled():
+            return VOICE_SESSION_CANCELLED
+
+        _publish_pipeline_stage(
+            visual_state,
+            "answer",
+            f"answer: {routed_request_status_message(interaction_plan)}",
             transcript=transcript,
             response="",
             error="",
@@ -243,7 +366,8 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             **command_audio_metadata_fields(archived_command_path, command_path, latest=True),
         )
         if stop_if_cancelled():
-            return
+            return VOICE_SESSION_CANCELLED
+        answer_started = time.monotonic()
         response, hermes_history, response_source = answer_routed_request(
             cfg,
             transcript,
@@ -251,8 +375,9 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             hermes_history,
             cancel_check=voice_cancel_requested,
         )
+        turn_timing["answer_seconds"] = _elapsed_seconds(answer_started)
         if stop_if_cancelled():
-            return
+            return VOICE_SESSION_CANCELLED
         if response:
             archive_turns.append({
                 "turn": turn_index,
@@ -270,24 +395,43 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                 turns=archive_turns,
             )
             append_visualization_turn(visual_state, transcript=transcript, response=response)
-            update_visualization_state(
-                visual_state,
-                status="speaking",
-                message=(
-                    "Hermes responded. Speaking now; then I’ll keep listening…"
-                    if conversation_enabled
-                    else "Hermes responded. Generating and playing voice output…"
-                ),
-                transcript=transcript,
-                response=response,
-                error="",
-                current_turn=turn_index,
+
+            def publish_speech_stage(stage: str) -> None:
+                message = (
+                    "TTS: Hermes answered; generating spoken audio…"
+                    if stage == "tts"
+                    else (
+                        "playback: playing the response; then I’ll keep listening…"
+                        if conversation_enabled
+                        else "playback: playing the response…"
+                    )
+                )
+                _publish_pipeline_stage(
+                    visual_state,
+                    stage,
+                    message,
+                    transcript=transcript,
+                    response=response,
+                    error="",
+                    current_turn=turn_index,
+                )
+
+            if stop_if_cancelled():
+                return VOICE_SESSION_CANCELLED
+            speak_started = time.monotonic()
+            speak_result = speak_response(
+                cfg,
+                response,
+                cancel_check=voice_cancel_requested,
+                stage_callback=publish_speech_stage,
             )
+            _merge_speak_timing(turn_timing, speak_result, _elapsed_seconds(speak_started))
+            turn_timing["turn_seconds"] = _elapsed_seconds(turn_started)
+            if archive_turns:
+                archive_turns[-1]["timings"] = dict(turn_timing)
+            _publish_turn_timing(visual_state, activation_archive, turn_timings, turn_timing, archive_turns)
             if stop_if_cancelled():
-                return
-            speak_response(cfg, response, cancel_check=voice_cancel_requested)
-            if stop_if_cancelled():
-                return
+                return VOICE_SESSION_CANCELLED
             if not conversation_enabled:
                 update_visualization_state(
                     visual_state,
@@ -303,7 +447,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
                     close_reason="single_turn_complete",
                     turns=archive_turns,
                 )
-                return
+                return VOICE_SESSION_COMPLETED
             update_activation_archive_metadata(
                 activation_archive,
                 status="awaiting_followup",
@@ -328,7 +472,7 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             turns=archive_turns,
         )
         maybe_beep(cfg, frequency=330, count=2)
-        return
+        return VOICE_SESSION_COMPLETED
 
     if not STOP.is_set():
         update_visualization_state(
@@ -343,3 +487,4 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> None:
             close_reason="max_turns",
             turns=archive_turns,
         )
+    return VOICE_SESSION_COMPLETED
