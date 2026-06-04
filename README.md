@@ -159,10 +159,10 @@ Raise the wake threshold above the default `0.6973556280136108`:
 threshold: 0.75
 ```
 
-You can also require more repeated wake detections before it triggers:
+By default, Hermes requires two consecutive positive wake windows to reduce false wakes. For lower latency, opt into one positive wake window explicitly:
 
 ```yaml
-trigger_consecutive_windows: 3
+trigger_consecutive_windows: 1
 ```
 
 Restart after editing:
@@ -226,6 +226,28 @@ Activation archives are local, but they can contain private speech. Do not publi
 ```
 
 Also remember that voice requests can use the same Hermes tools as your normal CLI sessions. Treat this like giving your local assistant a microphone, not like installing a harmless sound widget.
+
+## Phase 0 latency summaries
+
+Activation archives now include Phase 0 timing metadata for completed turns. To summarize the local archive without starting the daemon:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary
+```
+
+To summarize a specific archive directory:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations
+```
+
+For scripts or benchmark comparisons, emit JSON:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations --summary-json
+```
+
+The summary reports archive count, turn count, status/cancel counts, response-source counts, and per-stage timing statistics such as recording, STT, routing, answer generation, TTS, playback, and total turn time. If archive metadata is tagged with `benchmark_preset` and `benchmark_category`, the same metrics are grouped by preset so repeated task runs can be compared before and after later changes.
 
 ## Troubleshooting
 
@@ -334,6 +356,8 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `threshold`: wakeword trigger probability.
 - `trigger_consecutive_windows`: number of positive windows required before activation.
 - `inference_interval_seconds`: CPU/latency tradeoff for ONNX inference.
+- `cooldown_seconds`: normal delay before listening again after a completed activation.
+- `cancel_cooldown_seconds`: delay before listening again after popup Ctrl-C cancellation; `0.0` re-arms immediately.
 - `speech_rms_threshold`: rough speech volume threshold while recording a request.
 - `speech_start_timeout_seconds`: how long to wait for speech after the wake beep.
 - `speech_silence_duration_seconds`: how long silence must last before the request is considered done.
@@ -353,6 +377,7 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `interaction_router_ack_cache_enabled`: cache short acknowledgement clips like “Okay, I’m on it.” Cached files preserve the TTS provider's audio extension, and acknowledgements are played asynchronously before full-agent work.
 - `playback_sink`: `@DEFAULT_SINK@`, `all`, or a specific Pulse/PipeWire sink name.
 - `visualization_enabled`: open the optional popup window.
+- `visualization_launch_grace_seconds`: how long to wait for a terminal launch to fail before trying the next candidate.
 - `conversation_mode_enabled`: keep listening after the first answer.
 - `conversation_close_phrases`: phrases that end the voice session.
 - `save_activation_audio`: save wake clips and metadata for later review.
@@ -388,7 +413,8 @@ PYTHON=/path/to/python ./scripts/install_user_service.sh
 ```bash
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --smoke-test
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --list-devices
-~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations --summary-json
+~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/activation_archive.py src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
 PYTHONPATH=src ~/.hermes/hermes-agent/venv/bin/python -m pytest -q
 ```
 

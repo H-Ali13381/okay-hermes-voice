@@ -1,4 +1,4 @@
-"""Activation archive WAV and metadata persistence."""
+"""Public activation archive facade and metadata persistence."""
 from __future__ import annotations
 
 import contextlib
@@ -11,8 +11,10 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from .audio_io import float_waveform_to_int16, write_wav_int16_to_path
+from .audio import float_waveform_to_int16, write_wav_int16_to_path
 from .daemon_config import DEFAULT_CONFIG, LOG
+
+from .activation.archive.summary import format_activation_latency_summary, summarize_activation_archives
 
 def _activation_timestamp(detected_at: float) -> str:
     whole = time.strftime("%Y%m%d_%H%M%S", time.localtime(detected_at))
@@ -119,3 +121,13 @@ def command_audio_metadata_fields(archived_command_path: Optional[str], command_
     if archived_command_path:
         return {"latest_command_wav_path" if latest else "command_wav_path": archived_command_path}
     return {"temp_command_wav_path": str(command_path)}
+
+
+__all__ = [
+    "archive_command_audio",
+    "command_audio_metadata_fields",
+    "format_activation_latency_summary",
+    "save_activation_archive",
+    "summarize_activation_archives",
+    "update_activation_archive_metadata",
+]

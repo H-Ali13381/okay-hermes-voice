@@ -6,6 +6,7 @@ threshold: 0.6973556280136108
 trigger_consecutive_windows: 2
 inference_interval_seconds: 0.5
 cooldown_seconds: 2.5
+cancel_cooldown_seconds: 0.0  # re-arm immediately after Ctrl-C popup cancellation
 sample_rate: 16000
 window_seconds: 3.0
 block_seconds: 0.1
@@ -67,6 +68,7 @@ visualization_enabled: true
 visualization_terminal: auto
 visualization_title: Hermes Voice
 visualization_keep_open_seconds: 45.0
+visualization_launch_grace_seconds: 0.35
 # Omit visualization_script to use the installed package copy.
 
 conversation_mode_enabled: true

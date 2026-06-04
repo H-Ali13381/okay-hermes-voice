@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import types
 
 import numpy as np
@@ -8,6 +9,43 @@ import numpy as np
 from okay_hermes_voice import audio_io as audio
 from okay_hermes_voice import daemon_config as daemon_config
 from okay_hermes_voice import playback
+from okay_hermes_voice.audio import recording as audio_recording
+
+
+def test_audio_io_facade_exports_semantic_audio_modules():
+    from okay_hermes_voice.audio import devices as devices_mod
+    from okay_hermes_voice.audio import recording as recording_mod
+    from okay_hermes_voice.audio import smoke as smoke_mod
+    from okay_hermes_voice.audio import transcription as transcription_mod
+    from okay_hermes_voice.audio import wake as wake_mod
+    from okay_hermes_voice.audio import waveform as waveform_mod
+    from okay_hermes_voice.audio import wav as wav_mod
+
+    assert audio.model_session is wake_mod.model_session
+    assert audio.run_wake_inference is wake_mod.run_wake_inference
+    assert audio.wait_for_wake is wake_mod.wait_for_wake
+    assert audio.record_command is recording_mod.record_command
+    assert audio.transcribe_command is transcription_mod.transcribe_command
+    assert audio.prewarm_stt is transcription_mod.prewarm_stt
+    assert audio.float_waveform_to_int16 is waveform_mod.float_waveform_to_int16
+    assert audio.rms_int16 is waveform_mod.rms_int16
+    assert audio.write_wav_int16 is wav_mod.write_wav_int16
+    assert audio.write_wav_int16_to_path is wav_mod.write_wav_int16_to_path
+    assert audio.list_devices is devices_mod.list_devices
+    assert audio.smoke_test is smoke_mod.smoke_test
+    assert all(not name.startswith("_") for name in audio.__all__)
+    assert not {"collections", "contextlib", "json", "math", "queue", "tempfile", "time", "wave"} & set(audio.__all__)
+
+
+def test_playback_package_facade_exports_response_helpers():
+    from okay_hermes_voice.playback import response as response_mod
+
+    assert hasattr(playback, "__path__")
+    assert playback.speak_response is response_mod.speak_response
+    assert playback.play_tts_file is response_mod.play_tts_file
+    assert playback.maybe_beep is response_mod.maybe_beep
+    assert all(not name.startswith("_") for name in playback.__all__)
+    assert not {"contextlib", "json", "subprocess", "threading", "time"} & set(playback.__all__)
 
 
 def test_record_command_returns_none_without_opening_stream_when_cancelled(monkeypatch):
@@ -16,7 +54,7 @@ def test_record_command_returns_none_without_opening_stream_when_cancelled(monke
 
     cfg = dict(daemon_config.DEFAULT_CONFIG)
     cfg.update({"speech_start_timeout_seconds": 1.0, "block_seconds": 0.1})
-    monkeypatch.setattr(audio.sd, "InputStream", fail_if_opened)
+    monkeypatch.setattr(audio_recording.sd, "InputStream", fail_if_opened)
 
     assert audio.record_command(cfg, cancel_check=lambda: True) is None
 
@@ -64,9 +102,9 @@ def test_record_command_ignores_isolated_spike_before_real_speech(monkeypatch):
             "speech_start_timeout_seconds": 10.0,
         }
     )
-    monkeypatch.setattr(audio.sd, "InputStream", FakeInputStream)
-    monkeypatch.setattr(audio.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(audio, "write_wav_int16", fake_write_wav)
+    monkeypatch.setattr(audio_recording.sd, "InputStream", FakeInputStream)
+    monkeypatch.setattr(audio_recording.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(audio_recording, "write_wav_int16", fake_write_wav)
 
     assert audio.record_command(cfg) == Path("/tmp/captured-command.wav")
     assert captured["sample_rate"] == 16000
@@ -102,13 +140,13 @@ def test_play_tts_file_terminates_player_when_cancel_requested(monkeypatch):
     fake_proc.kill = kill
     fake_proc.wait = wait
 
-    monkeypatch.setattr(playback.subprocess, "Popen", lambda *_args, **_kwargs: fake_proc)
+    monkeypatch.setattr(playback.response.subprocess, "Popen", lambda *_args, **_kwargs: fake_proc)
     monkeypatch.setattr(
-        playback.subprocess,
+        playback.response.subprocess,
         "run",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("playback should use cancellable Popen")),
     )
-    monkeypatch.setattr(playback.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(playback.response.time, "sleep", lambda *_args, **_kwargs: None)
 
     cancel_checks = iter([False, False, True])
 
@@ -120,3 +158,57 @@ def test_play_tts_file_terminates_player_when_cancel_requested(monkeypatch):
 
     assert ok is False
     assert fake_proc.terminated is True
+
+
+def test_speak_response_returns_generation_and_playback_timing(monkeypatch):
+    clock = {"now": 10.0}
+    calls = []
+
+    def fake_monotonic():
+        return clock["now"]
+
+    def fake_text_to_speech_tool(text):
+        calls.append(("tts", text))
+        clock["now"] += 0.25
+        return json.dumps({"success": True, "file_path": "/tmp/response.wav"})
+
+    def fake_play_tts_file(cfg, file_path, cancel_check=None):
+        calls.append(("play", file_path, bool(cancel_check and cancel_check())))
+        clock["now"] += 0.75
+        return True
+
+    monkeypatch.setattr(playback.response.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(playback.response, "text_to_speech_tool", fake_text_to_speech_tool)
+    monkeypatch.setattr(playback.response, "play_tts_file", fake_play_tts_file)
+
+    timing = playback.speak_response(
+        {"tts_enabled": True, "max_spoken_response_chars": 2500},
+        "spoken answer",
+        cancel_check=lambda: False,
+    )
+
+    assert calls == [("tts", "spoken answer"), ("play", "/tmp/response.wav", False)]
+    assert timing["tts_success"] is True
+    assert timing["playback_success"] is True
+    assert timing["tts_seconds"] == 0.25
+    assert timing["playback_seconds"] == 0.75
+    assert timing["speak_seconds"] == 1.0
+    assert timing["tts_file_path"] == "/tmp/response.wav"
+
+
+def test_speak_response_notifies_tts_and_playback_stage_callbacks(monkeypatch):
+    monkeypatch.setattr(playback.response, "text_to_speech_tool", lambda _text: json.dumps({"success": True, "file_path": "/tmp/response.wav"}))
+    monkeypatch.setattr(playback.response, "play_tts_file", lambda *_args, **_kwargs: True)
+
+    stages = []
+
+    timing = playback.speak_response(
+        {"tts_enabled": True, "max_spoken_response_chars": 2500},
+        "spoken answer",
+        cancel_check=lambda: False,
+        stage_callback=stages.append,
+    )
+
+    assert stages == ["tts", "playback"]
+    assert timing["tts_success"] is True
+    assert timing["playback_success"] is True
