@@ -54,7 +54,7 @@ def test_record_command_returns_none_without_opening_stream_when_cancelled(monke
 
     cfg = dict(daemon_config.DEFAULT_CONFIG)
     cfg.update({"speech_start_timeout_seconds": 1.0, "block_seconds": 0.1})
-    monkeypatch.setattr(audio_recording.sd, "InputStream", fail_if_opened)
+    monkeypatch.setattr(audio_recording, "_SD", types.SimpleNamespace(InputStream=fail_if_opened))
 
     assert audio.record_command(cfg, cancel_check=lambda: True) is None
 
@@ -102,7 +102,7 @@ def test_record_command_ignores_isolated_spike_before_real_speech(monkeypatch):
             "speech_start_timeout_seconds": 10.0,
         }
     )
-    monkeypatch.setattr(audio_recording.sd, "InputStream", FakeInputStream)
+    monkeypatch.setattr(audio_recording, "_SD", types.SimpleNamespace(InputStream=FakeInputStream))
     monkeypatch.setattr(audio_recording.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(audio_recording, "write_wav_int16", fake_write_wav)
 
@@ -167,7 +167,7 @@ def test_record_command_streams_nemotron_live_during_capture(monkeypatch):
             "speech_start_timeout_seconds": 10.0,
         }
     )
-    monkeypatch.setattr(audio_recording.sd, "InputStream", FakeInputStream)
+    monkeypatch.setattr(audio_recording, "_SD", types.SimpleNamespace(InputStream=FakeInputStream))
     monkeypatch.setattr(audio_recording.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(audio_recording, "write_wav_int16", fake_write_wav)
     monkeypatch.setattr(audio_recording, "start_nemotron_live_streaming", lambda _cfg: live)

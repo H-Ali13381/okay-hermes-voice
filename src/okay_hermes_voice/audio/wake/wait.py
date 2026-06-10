@@ -9,7 +9,6 @@ from typing import Any, Deque, Dict, Optional
 
 import numpy as np
 import onnxruntime as ort
-import sounddevice as sd
 
 from ...daemon_config import LOG, STOP
 from .inference import run_wake_inference
@@ -28,7 +27,9 @@ def wait_for_wake(cfg: Dict[str, Any], session: ort.InferenceSession, input_name
     recent: Deque[float] = collections.deque(maxlen=consecutive)
     last_inference = 0.0
 
-    def callback(indata: np.ndarray, frames: int, time_info: Any, status: sd.CallbackFlags) -> None:
+    import sounddevice as sd  # type: ignore[import-not-found]
+
+    def callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         del frames, time_info
         if status:
             LOG.debug("Wake audio callback status: %s", status)

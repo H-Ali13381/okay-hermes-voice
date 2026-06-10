@@ -5,28 +5,34 @@ import collections
 import contextlib
 import queue
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Union
 
 import numpy as np
-import sounddevice as sd
 
 from ..daemon_config import LOG, STOP
 from .nemotron_config import is_nemotron_provider
 from .nemotron_stt import start_nemotron_live_streaming
 from .parakeet_config import is_parakeet_provider
 from .parakeet_stt import start_parakeet_live_streaming
+from .recording_result import CommandRecording
 from .waveform import rms_int16
 from .wav import write_wav_int16
 
+_SD = None
 
-@dataclass(frozen=True)
-class CommandRecording:
-    """Recorded command WAV plus optional transcript produced during recording."""
 
-    path: Path
-    live_transcript: str = ""
+class _SoundDeviceBackend:
+    def __call__(self) -> Any:
+        global _SD
+        if _SD is None:
+            import sounddevice as sd  # type: ignore[import-not-found]
+
+            _SD = sd
+        return _SD
+
+
+_sounddevice = _SoundDeviceBackend()
 
 
 def _cancel_check_requested(cancel_check: Optional[Callable[[], bool]]) -> bool:
@@ -60,7 +66,7 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
     last_voice_time: Optional[float] = None
     consecutive_voice_blocks = 0
 
-    def callback(indata: np.ndarray, frames: int, time_info: Any, status: sd.CallbackFlags) -> None:
+    def callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         del frames, time_info
         if status:
             LOG.debug("Command audio callback status: %s", status)
@@ -79,7 +85,7 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
         live_session = start_nemotron_live_streaming(cfg)
 
     LOG.info("Recording command; speech_rms_threshold=%.1f silence=%.1fs", threshold, silence_duration)
-    with sd.InputStream(
+    with _sounddevice().InputStream(
         samplerate=sample_rate,
         channels=1,
         dtype="int16",
