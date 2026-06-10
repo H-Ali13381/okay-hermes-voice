@@ -9,7 +9,8 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from ..audio import float_waveform_to_int16, write_wav_int16_to_path
+from ..audio.waveform import float_waveform_to_int16
+from ..audio.wav import write_wav_int16_to_path
 from ..daemon_config import DEFAULT_CONFIG, LOG
 
 

@@ -9,7 +9,6 @@ MAX_LEAF_FUNCTIONS = 2
 # Entrypoints and orchestration spines are allowed to tell a larger story at the
 # package root. Implementation leaves are not.
 STRUCTURE_EXEMPTIONS = {
-    Path("okay_hermes_voice/activation_flow.py"),
     Path("okay_hermes_voice/daemon_config.py"),
     Path("okay_hermes_voice/hermes_agent_cache.py"),
     Path("okay_hermes_voice/hermes_runtime.py"),

@@ -586,12 +586,13 @@ def test_launch_visualization_infers_wayland_display_for_systemd_service_env(mon
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     wayland_socket = runtime_dir / "wayland-0"
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(str(wayland_socket))
+    wayland_socket.touch()
     captured_env = {}
+    original_is_socket = Path.is_socket
 
     monkeypatch.setattr(viz.state, "_visualization_state_path", lambda: state_path)
     monkeypatch.setattr(viz.launcher.shutil, "which", lambda name: "/usr/bin/kitty" if name == "kitty" else None)
+    monkeypatch.setattr(Path, "is_socket", lambda path: path == wayland_socket or original_is_socket(path))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
@@ -610,21 +611,18 @@ def test_launch_visualization_infers_wayland_display_for_systemd_service_env(mon
         captured_env.update(kwargs["env"])
         return FakeProc()
 
-    try:
-        monkeypatch.setattr(viz.launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(viz.launcher.subprocess, "Popen", fake_popen)
 
-        result = viz.launch_visualization(
-            {
-                "visualization_enabled": True,
-                "visualization_terminal": "kitty",
-                "visualization_title": "Hermes Voice",
-                "visualization_script": str(script),
-                "visualization_keep_open_seconds": 45.0,
-            },
-            probability=0.9,
-        )
-    finally:
-        sock.close()
+    result = viz.launch_visualization(
+        {
+            "visualization_enabled": True,
+            "visualization_terminal": "kitty",
+            "visualization_title": "Hermes Voice",
+            "visualization_script": str(script),
+            "visualization_keep_open_seconds": 45.0,
+        },
+        probability=0.9,
+    )
 
     assert result == state_path
     assert captured_env["WAYLAND_DISPLAY"] == "wayland-0"

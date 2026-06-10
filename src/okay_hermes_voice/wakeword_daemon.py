@@ -16,13 +16,52 @@ from typing import Any, Dict, Iterable, Optional
 
 from .activation_archive import format_activation_latency_summary, summarize_activation_archives
 from .activation_flow import VOICE_SESSION_CANCELLED, handle_activation
-from .audio import list_devices, model_session, prewarm_stt, smoke_test, wait_for_wake
 from .daemon_config import CONFIG_PATH, DEFAULT_CONFIG, LOG, STOP, load_config, setup_logging, signal_handler
-from .hermes_runtime import prewarm_hermes
 from .interaction_router import AckTemplate, RouteTarget, VoiceRequestPlan
-from .visualization import visualization_test
 
 __all__ = ["main", "post_activation_cooldown_seconds"]
+
+
+def list_devices() -> int:
+    from .audio import list_devices as run
+
+    return run()
+
+
+def model_session(model_path: str):
+    from .audio import model_session as load
+
+    return load(model_path)
+
+
+def prewarm_stt(cfg: Dict[str, Any]) -> None:
+    from .audio import prewarm_stt as run
+
+    run(cfg)
+
+
+def smoke_test(cfg: Dict[str, Any]) -> int:
+    from .audio import smoke_test as run
+
+    return run(cfg)
+
+
+def wait_for_wake(cfg: Dict[str, Any], session: Any, input_name: str, output_name: str):
+    from .audio import wait_for_wake as wait
+
+    return wait(cfg, session, input_name, output_name)
+
+
+def prewarm_hermes(cfg: Dict[str, Any]) -> None:
+    from .hermes_runtime import prewarm_hermes as run
+
+    run(cfg)
+
+
+def visualization_test(cfg: Dict[str, Any], text: str) -> int:
+    from .visualization import visualization_test as run
+
+    return run(cfg, text)
 
 
 def post_activation_cooldown_seconds(cfg: Dict[str, Any], session_result: Any) -> float:
