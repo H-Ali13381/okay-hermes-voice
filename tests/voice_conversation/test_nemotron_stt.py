@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 import types
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
-from okay_hermes_voice.audio import nemotron_provider
 from okay_hermes_voice.audio import nemotron_stt
 from okay_hermes_voice.audio import transcription
 from okay_hermes_voice import daemon_config
-from okay_hermes_voice import activation_flow
+from okay_hermes_voice.activation.flow import VOICE_SESSION_COMPLETED, ActivationFlowServices, handle_activation_impl
+from okay_hermes_voice.activation_archive import command_audio_metadata_fields, update_activation_archive_metadata
+from okay_hermes_voice.audio.nemotron import transcriber as nemotron_transcriber
+from okay_hermes_voice.visualization import (
+    append_visualization_turn,
+    finish_cancelled_voice_session,
+    is_visualization_cancel_requested,
+    update_visualization_state,
+    visualization_cancel_reason,
+)
+from okay_hermes_voice.voice_routing.close_detection import is_close_transcript
+from okay_hermes_voice.voice_routing.status import interaction_ack_text, routed_request_status_message
 
 
 class FakeTensor:
@@ -143,17 +155,26 @@ class FakeStreamingBuffer:
         return self._step_index >= len(self.steps) - 1
 
 
+class _TestLog:
+    def info(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+
 def test_nemotron_transcriber_uses_cache_aware_streaming_loop(monkeypatch, tmp_path):
     FakeASRModel.created_model = None
     FakeASRModel.loaded_by = None
     FakeStreamingBuffer.instances.clear()
     monkeypatch.setattr(
-        nemotron_provider,
-        "_load_nemotron_dependencies",
+        nemotron_transcriber,
+        "load_nemotron_dependencies",
         lambda: (FakeTorch, FakeNemo, FakeStreamingBuffer),
     )
 
-    monkeypatch.setattr(nemotron_provider, "_load_mono_audio_samples", lambda _path: np.array([[1, 3, 5], [3, 5, 7]], dtype=np.float32).mean(axis=0))
+    monkeypatch.setattr(
+        nemotron_transcriber,
+        "load_mono_audio_samples",
+        lambda _path: np.array([[1, 3, 5], [3, 5, 7]], dtype=np.float32).mean(axis=0),
+    )
 
     cfg = nemotron_stt.NemotronStreamingConfig(
         model_name="nvidia/nemotron-speech-streaming-en-0.6b",
@@ -192,8 +213,8 @@ def test_nemotron_live_session_reuses_first_stream_after_negative_initial_stream
     FakeASRModel.loaded_by = None
     FakeStreamingBuffer.instances.clear()
     monkeypatch.setattr(
-        nemotron_provider,
-        "_load_nemotron_dependencies",
+        nemotron_transcriber,
+        "load_nemotron_dependencies",
         lambda: (FakeTorch, FakeNemo, FakeStreamingBuffer),
     )
 
@@ -262,7 +283,7 @@ def test_activation_flow_passes_daemon_config_to_stt(monkeypatch, tmp_path):
     seen = []
 
     def fake_launch_visualization(_cfg, probability):
-        activation_flow.update_visualization_state(
+        update_visualization_state(
             state_path,
             status="listening",
             probability=probability,
@@ -275,21 +296,37 @@ def test_activation_flow_passes_daemon_config_to_stt(monkeypatch, tmp_path):
         seen.append((path, cfg["stt_provider"]))
         return "test nemotron"
 
-    activation_flow.STOP.clear()
-    monkeypatch.setattr(activation_flow, "save_activation_archive", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(activation_flow, "launch_visualization", fake_launch_visualization)
-    monkeypatch.setattr(activation_flow, "maybe_beep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(activation_flow, "record_command", lambda *_args, **_kwargs: command_path)
-    monkeypatch.setattr(activation_flow, "archive_command_audio", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(activation_flow, "transcribe_command", fake_transcribe)
-    monkeypatch.setattr(activation_flow, "route_transcribed_request", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(activation_flow, "answer_routed_request", lambda *_args, **_kwargs: ("spoken answer", [], "heavy_agent"))
-    monkeypatch.setattr(activation_flow, "speak_response", lambda *_args, **_kwargs: None)
+    services = ActivationFlowServices(
+        archive_command_audio=lambda *_args, **_kwargs: None,
+        command_audio_metadata_fields=command_audio_metadata_fields,
+        save_activation_archive=lambda *_args, **_kwargs: None,
+        update_activation_archive_metadata=update_activation_archive_metadata,
+        record_command=lambda *_args, **_kwargs: command_path,
+        transcribe_command=fake_transcribe,
+        log=_TestLog(),
+        stop=threading.Event(),
+        maybe_beep=lambda *_args, **_kwargs: None,
+        speak_response=lambda *_args, **_kwargs: None,
+        append_visualization_turn=append_visualization_turn,
+        finish_cancelled_voice_session=finish_cancelled_voice_session,
+        is_visualization_cancel_requested=is_visualization_cancel_requested,
+        launch_visualization=fake_launch_visualization,
+        update_visualization_state=update_visualization_state,
+        visualization_cancel_reason=visualization_cancel_reason,
+        answer_routed_request=lambda *_args, **_kwargs: ("spoken answer", [], "heavy_agent"),
+        command_recording_config_for_turn=lambda cfg, _turn: cfg,
+        interaction_ack_text=interaction_ack_text,
+        is_close_transcript=is_close_transcript,
+        route_transcribed_request=lambda *_args, **_kwargs: None,
+        routed_request_status_message=routed_request_status_message,
+        time=__import__("time"),
+    )
 
-    result = activation_flow.handle_activation(
+    result = handle_activation_impl(
+        services,
         {"conversation_mode_enabled": False, "stt_provider": "nemotron_en_streaming"},
         {"probability": 0.9},
     )
 
-    assert result == activation_flow.VOICE_SESSION_COMPLETED
+    assert result == VOICE_SESSION_COMPLETED
     assert seen == [(command_path, "nemotron_en_streaming")]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import types
 
 import numpy as np
 
@@ -95,7 +96,7 @@ def test_record_command_starts_parakeet_live_streaming(monkeypatch):
             "speech_start_timeout_seconds": 10.0,
         }
     )
-    monkeypatch.setattr(audio_recording.sd, "InputStream", FakeInputStream)
+    monkeypatch.setattr(audio_recording, "_SD", types.SimpleNamespace(InputStream=FakeInputStream))
     monkeypatch.setattr(audio_recording.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(audio_recording, "write_wav_int16", fake_write_wav)
     monkeypatch.setattr(audio_recording, "start_parakeet_live_streaming", lambda _cfg: live)
