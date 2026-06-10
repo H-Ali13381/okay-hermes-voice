@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 from .activation_archive import (
@@ -174,11 +175,11 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
         record_started = time.monotonic()
         record_wall_started = time.time()
         turn_timing["wake_to_record_start_seconds"] = max(0.0, record_wall_started - activation_detected_at)
-        command_path = record_command(command_recording_config_for_turn(cfg, turn_index), cancel_check=voice_cancel_requested)
+        recording = record_command(command_recording_config_for_turn(cfg, turn_index), cancel_check=voice_cancel_requested)
         turn_timing["record_seconds"] = _elapsed_seconds(record_started)
         if stop_if_cancelled():
             return VOICE_SESSION_CANCELLED
-        if not command_path:
+        if not recording:
             if first_turn or not conversation_enabled:
                 update_visualization_state(
                     visual_state,
@@ -209,6 +210,10 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
             maybe_beep(cfg, frequency=330, count=1)
             continue
 
+        raw_command_path = getattr(recording, "path", None)
+        command_path = raw_command_path if isinstance(raw_command_path, Path) else Path(str(raw_command_path or recording))
+        live_transcript = str(getattr(recording, "live_transcript", "") or "").strip()
+        turn_timing["live_stt_during_recording"] = bool(live_transcript)
         archived_command_path = archive_command_audio(cfg, activation_archive, command_path, turn_index)
         _publish_pipeline_stage(
             visual_state,
@@ -223,8 +228,15 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
             **command_audio_metadata_fields(archived_command_path, command_path, latest=True),
         )
         transcribe_started = time.monotonic()
-        transcript = transcribe_command(command_path)
-        turn_timing["transcribe_seconds"] = _elapsed_seconds(transcribe_started)
+        if live_transcript:
+            transcript = live_transcript
+            turn_timing["transcribe_seconds"] = 0.0
+            turn_timing["live_stt_used"] = True
+            LOG.info("Using live STT transcript captured during recording: %s", transcript)
+        else:
+            transcript = transcribe_command(command_path, cfg)
+            turn_timing["transcribe_seconds"] = _elapsed_seconds(transcribe_started)
+            turn_timing["live_stt_used"] = False
         if stop_if_cancelled():
             return VOICE_SESSION_CANCELLED
         if not transcript:
@@ -259,6 +271,40 @@ def handle_activation(cfg: Dict[str, Any], activation: Any) -> str:
             )
             maybe_beep(cfg, frequency=330, count=1)
             continue
+
+        if cfg.get("transcript_only_mode", False):
+            turn_timing["route_seconds"] = 0.0
+            turn_timing["answer_seconds"] = 0.0
+            turn_timing["speak_seconds"] = 0.0
+            turn_timing["turn_seconds"] = _elapsed_seconds(turn_started)
+            archive_turns.append({
+                "turn": turn_index,
+                "transcript": transcript,
+                "response": "",
+                "response_source": "transcript_only",
+                "timings": dict(turn_timing),
+                **command_audio_metadata_fields(archived_command_path, command_path),
+            })
+            _publish_turn_timing(visual_state, activation_archive, turn_timings, turn_timing, archive_turns)
+            update_visualization_state(
+                visual_state,
+                status="done",
+                message="Transcript captured; shadow comparison complete.",
+                transcript=transcript,
+                response="",
+                error="",
+            )
+            update_activation_archive_metadata(
+                activation_archive,
+                status="transcript_only_completed",
+                close_reason="transcript_only",
+                latest_transcript=transcript,
+                turns=archive_turns,
+                current_turn=turn_index,
+                **command_audio_metadata_fields(archived_command_path, command_path, latest=True),
+            )
+            LOG.info("Transcript-only voice session completed: %r", transcript)
+            return VOICE_SESSION_COMPLETED
 
         if conversation_enabled and is_close_transcript(transcript, cfg):
             ack = str(cfg.get("conversation_close_ack") or "").strip()

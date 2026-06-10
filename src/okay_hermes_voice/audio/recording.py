@@ -5,15 +5,28 @@ import collections
 import contextlib
 import queue
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Union
 
 import numpy as np
 import sounddevice as sd
 
 from ..daemon_config import LOG, STOP
+from .nemotron_config import is_nemotron_provider
+from .nemotron_stt import start_nemotron_live_streaming
+from .parakeet_config import is_parakeet_provider
+from .parakeet_stt import start_parakeet_live_streaming
 from .waveform import rms_int16
 from .wav import write_wav_int16
+
+
+@dataclass(frozen=True)
+class CommandRecording:
+    """Recorded command WAV plus optional transcript produced during recording."""
+
+    path: Path
+    live_transcript: str = ""
 
 
 def _cancel_check_requested(cancel_check: Optional[Callable[[], bool]]) -> bool:
@@ -26,7 +39,7 @@ def _cancel_check_requested(cancel_check: Optional[Callable[[], bool]]) -> bool:
         return False
 
 
-def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool]] = None) -> Optional[Path]:
+def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool]] = None) -> Optional[Union[Path, CommandRecording]]:
     sample_rate = int(cfg["sample_rate"])
     block_samples = int(float(cfg["block_seconds"]) * sample_rate)
     threshold = float(cfg["speech_rms_threshold"])
@@ -39,6 +52,8 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
     audio_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=128)
     chunks: List[np.ndarray] = []
     preroll: Deque[np.ndarray] = collections.deque(maxlen=max(1, int(0.4 / float(cfg["block_seconds"]))))
+    live_session = None
+    live_transcript = ""
     started = False
     start_time = time.monotonic()
     speech_start_time: Optional[float] = None
@@ -56,6 +71,12 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
     if _cancel_check_requested(cancel_check):
         LOG.info("Command recording cancelled before audio stream opened")
         return None
+    if bool(cfg.get("parakeet_live_streaming", False)) and is_parakeet_provider(cfg.get("stt_provider")):
+        LOG.info("Starting live Parakeet streaming STT before command capture")
+        live_session = start_parakeet_live_streaming(cfg)
+    elif bool(cfg.get("nemotron_live_streaming", False)) and is_nemotron_provider(cfg.get("stt_provider")):
+        LOG.info("Starting live Nemotron streaming STT before command capture")
+        live_session = start_nemotron_live_streaming(cfg)
 
     LOG.info("Recording command; speech_rms_threshold=%.1f silence=%.1fs", threshold, silence_duration)
     with sd.InputStream(
@@ -92,6 +113,9 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
                         started = True
                         speech_start_time = now - (start_consecutive_blocks - 1) * float(cfg["block_seconds"])
                         chunks.extend(list(preroll))
+                        if live_session is not None:
+                            for buffered_block in preroll:
+                                live_transcript = live_session.accept_int16(buffered_block)
                         LOG.info(
                             "Speech started; rms=%.1f consecutive_blocks=%d",
                             level,
@@ -104,6 +128,8 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
             if has_voice:
                 last_voice_time = now
             chunks.append(block)
+            if live_session is not None:
+                live_transcript = live_session.accept_int16(block)
             if last_voice_time is not None and now - last_voice_time >= silence_duration:
                 LOG.info("Speech ended after %.1fs silence", silence_duration)
                 break
@@ -117,7 +143,10 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
         return None
     path = write_wav_int16(audio, sample_rate)
     LOG.info("Command WAV saved: %s (%.2fs)", path, duration)
+    if live_session is not None:
+        live_transcript = live_session.finalize() or live_transcript
+        return CommandRecording(path=path, live_transcript=live_transcript)
     return path
 
 
-__all__ = ["record_command"]
+__all__ = ["CommandRecording", "record_command"]

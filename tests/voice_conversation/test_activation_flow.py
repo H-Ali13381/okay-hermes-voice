@@ -8,6 +8,7 @@ from okay_hermes_voice import activation_flow as flow
 from okay_hermes_voice import interaction_router as router
 from okay_hermes_voice import voice_activation_popup as popup
 from okay_hermes_voice import wakeword_daemon as wake
+from okay_hermes_voice.audio import recording as audio_recording
 
 
 def test_handle_activation_surfaces_routing_ack_text_in_popup(monkeypatch, tmp_path):
@@ -149,6 +150,100 @@ def test_handle_activation_honors_cancel_during_close_ack_playback(monkeypatch, 
     assert metadata["status"] == "cancelled_by_terminal"
     assert metadata["cancel_reason"] == "ctrl_c"
 
+
+def test_handle_activation_transcript_only_mode_skips_route_answer_and_tts(monkeypatch, tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    metadata_path = tmp_path / "activation.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+    archived_command_path = tmp_path / "archived-command.wav"
+
+    def fake_launch_visualization(_cfg, probability):
+        flow.update_visualization_state(
+            state_path,
+            status="listening",
+            probability=probability,
+            cancel_requested=False,
+            cancel_reason="",
+        )
+        return state_path
+
+    flow.STOP.clear()
+    monkeypatch.setattr(flow, "save_activation_archive", lambda *_args, **_kwargs: {"metadata_path": str(metadata_path)})
+    monkeypatch.setattr(flow, "launch_visualization", fake_launch_visualization)
+    monkeypatch.setattr(flow, "maybe_beep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flow, "record_command", lambda *_args, **_kwargs: command_path)
+    monkeypatch.setattr(flow, "archive_command_audio", lambda *_args, **_kwargs: str(archived_command_path))
+    monkeypatch.setattr(flow, "transcribe_command", lambda *_args, **_kwargs: "how are you doing today")
+    monkeypatch.setattr(flow, "route_transcribed_request", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("transcript-only path should not route")))
+    monkeypatch.setattr(flow, "answer_routed_request", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("transcript-only path should not answer")))
+    monkeypatch.setattr(flow, "speak_response", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("transcript-only path should not speak")))
+
+    result = flow.handle_activation(
+        {"conversation_mode_enabled": False, "transcript_only_mode": True},
+        {"probability": 0.9},
+    )
+
+    assert result == flow.VOICE_SESSION_COMPLETED
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert state["status"] == "done"
+    assert state["message"] == "Transcript captured; shadow comparison complete."
+    assert state["transcript"] == "how are you doing today"
+    assert metadata["status"] == "transcript_only_completed"
+    assert metadata["close_reason"] == "transcript_only"
+    assert metadata["latest_transcript"] == "how are you doing today"
+    assert metadata["turns"][0]["response_source"] == "transcript_only"
+    assert metadata["turns"][0]["timings"]["route_seconds"] == 0.0
+    assert metadata["turns"][0]["timings"]["answer_seconds"] == 0.0
+    assert metadata["turns"][0]["timings"]["speak_seconds"] == 0.0
+
+
+def test_handle_activation_uses_live_recording_transcript_without_post_wav_stt(monkeypatch, tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+    seen = []
+
+    def fake_launch_visualization(_cfg, probability):
+        flow.update_visualization_state(
+            state_path,
+            status="listening",
+            probability=probability,
+            cancel_requested=False,
+            cancel_reason="",
+        )
+        return state_path
+
+    def fake_answer_routed_request(_cfg, transcript, plan, history, *, cancel_check):
+        seen.append(transcript)
+        return "spoken answer", history, "heavy_agent"
+
+    flow.STOP.clear()
+    monkeypatch.setattr(flow, "save_activation_archive", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flow, "launch_visualization", fake_launch_visualization)
+    monkeypatch.setattr(flow, "maybe_beep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        flow,
+        "record_command",
+        lambda *_args, **_kwargs: audio_recording.CommandRecording(
+            path=command_path,
+            live_transcript="streamed nemotron transcript",
+        ),
+    )
+    monkeypatch.setattr(flow, "archive_command_audio", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flow, "transcribe_command", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("post-WAV STT should not run after live Nemotron")))
+    monkeypatch.setattr(flow, "route_transcribed_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flow, "answer_routed_request", fake_answer_routed_request)
+    monkeypatch.setattr(flow, "speak_response", lambda *_args, **_kwargs: {"speak_seconds": 0.0})
+
+    result = flow.handle_activation({"conversation_mode_enabled": False}, {"probability": 0.9})
+
+    assert result == flow.VOICE_SESSION_COMPLETED
+    assert seen == ["streamed nemotron transcript"]
+
+
 def test_handle_activation_passes_popup_cancel_check_to_heavy_agent_execution(monkeypatch, tmp_path):
     state_path = tmp_path / "voice_state.json"
     command_path = tmp_path / "command.wav"
@@ -275,8 +370,9 @@ def test_handle_activation_records_phase_zero_timing_in_popup_and_archive(monkey
         advance(1.25)
         return command_path
 
-    def fake_transcribe_command(path):
+    def fake_transcribe_command(path, cfg):
         assert path == command_path
+        assert cfg["conversation_mode_enabled"] is False
         advance(0.5)
         return "time this request"
 

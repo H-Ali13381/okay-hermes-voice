@@ -8,7 +8,7 @@ Boundary:
 from __future__ import annotations
 
 from .devices import list_devices
-from .recording import record_command
+from .recording import CommandRecording, record_command
 from .smoke import smoke_test
 from .transcription import prewarm_stt, transcribe_command
 from .wake import model_session, run_wake_inference, wait_for_wake
@@ -16,6 +16,7 @@ from .waveform import float_waveform_to_int16, rms_int16
 from .wav import write_wav_int16, write_wav_int16_to_path
 
 __all__ = [
+    "CommandRecording",
     "float_waveform_to_int16",
     "list_devices",
     "model_session",

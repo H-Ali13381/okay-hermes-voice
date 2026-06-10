@@ -61,6 +61,45 @@ max_spoken_response_chars: 2500
 playback_sink: '@DEFAULT_SINK@'   # use 'all' to fan out to every Pulse/PipeWire sink
 playback_volume: 1.0
 beep_enabled: true
+# For shadow/benchmark daemons: capture/transcribe/archive only; skip routing,
+# Hermes answer generation, TTS, and playback.
+transcript_only_mode: false
+
+# Speech-to-text provider. Default `hermes` uses Hermes' configured STT stack
+# (normally local faster-whisper). Set to `nemotron_en_streaming` for NVIDIA's
+# cache-aware streaming ASR or `parakeet_unified_streaming` for NVIDIA Parakeet
+# Unified English streaming ASR.
+stt_provider: hermes
+nemotron_model_name: nvidia/nemotron-speech-streaming-en-0.6b
+# Optional local .nemo path; blank downloads/loads by Hugging Face model name via NeMo.
+nemotron_model_path: ''
+nemotron_device: auto          # auto, cuda, or cpu
+nemotron_att_context_size: [70, 13]
+nemotron_amp: true
+nemotron_amp_dtype: float16
+# Disabled by default: this host hit a cuDNN sublibrary version mismatch with
+# Torch CUDA 13. Keeping CUDA enabled but cuDNN off preserves the streaming path.
+nemotron_cudnn_enabled: false
+# When true, the wakeword recorder feeds mic blocks into Nemotron during capture
+# and uses the live final transcript instead of transcribing the WAV afterward.
+nemotron_live_streaming: true
+nemotron_online_normalization: false
+nemotron_pad_and_drop_preencoded: false
+
+parakeet_model_name: nvidia/parakeet-unified-en-0.6b
+# Optional local .nemo path; blank downloads/loads by Hugging Face model name via NeMo.
+parakeet_model_path: ''
+parakeet_device: auto          # auto, cuda, or cpu
+# Chunked streaming context. chunk + right is the theoretical ASR latency.
+parakeet_left_context_secs: 2.0
+parakeet_chunk_secs: 0.56
+parakeet_right_context_secs: 0.56
+parakeet_amp: true
+parakeet_amp_dtype: float16
+parakeet_cudnn_enabled: false
+# When true, feed mic blocks into Parakeet during command capture.
+parakeet_live_streaming: true
+
 prewarm_stt_on_start: true
 log_path: ~/.hermes/logs/okay-hermes-wakeword.log
 

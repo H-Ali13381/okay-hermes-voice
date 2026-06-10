@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import wave
 from pathlib import Path
@@ -42,6 +43,25 @@ def test_example_config_uses_repeated_positive_wake_windows():
 
 def test_activation_archive_facade_exports_only_public_names():
     assert all(not name.startswith("_") for name in archive_mod.__all__)
+
+
+def test_activation_archive_is_package_facade_with_single_function_leaves():
+    assert hasattr(archive_mod, "__path__")
+    assert str(archive_mod.__file__).endswith("activation_archive/__init__.py")
+
+    leaf_modules = {
+        "archive_command_audio": "okay_hermes_voice.activation_archive.command_audio_archive",
+        "command_audio_metadata_fields": "okay_hermes_voice.activation_archive.command_audio_fields",
+        "save_activation_archive": "okay_hermes_voice.activation_archive.wake_archive",
+        "update_activation_archive_metadata": "okay_hermes_voice.activation_archive.metadata_update",
+    }
+    for function_name, module_name in leaf_modules.items():
+        module = importlib.import_module(module_name)
+        function = getattr(archive_mod, function_name)
+
+        assert function is getattr(module, function_name)
+        assert function.__module__ == module_name
+        assert [name for name in module.__all__ if callable(getattr(module, name, None))] == [function_name]
 
 
 def test_save_activation_archive_writes_wake_clip_and_metadata(tmp_path):

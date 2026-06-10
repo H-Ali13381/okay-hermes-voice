@@ -375,6 +375,19 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `interaction_router_min_confidence`: below this, route conservatively to the full Hermes agent.
 - `interaction_router_small_model_enabled`: allow simple/safe requests to bypass the full agent.
 - `interaction_router_ack_cache_enabled`: cache short acknowledgement clips like “Okay, I’m on it.” Cached files preserve the TTS provider's audio extension, and acknowledgements are played asynchronously before full-agent work.
+- `beep_enabled`: play short local beeps for wake/listening/error feedback.
+- `stt_provider`: `hermes` keeps the normal Hermes STT stack; `nemotron_en_streaming` enables NVIDIA Nemotron English-only cache-aware streaming ASR; `parakeet_unified_streaming` enables NVIDIA Parakeet Unified English streaming ASR.
+- `nemotron_model_name`: Hugging Face model id for the Nemotron provider, default `nvidia/nemotron-speech-streaming-en-0.6b`.
+- `nemotron_model_path`: optional local `.nemo` checkpoint path; blank loads by model name through NeMo.
+- `nemotron_device`: `auto`, `cuda`, or `cpu`.
+- `nemotron_att_context_size`: Nemotron streaming lookahead context, default `[70, 13]` for the English model.
+- `nemotron_cudnn_enabled`: enable/disable cuDNN for Nemotron CUDA inference; default `false` avoids the Torch CUDA 13 cuDNN sublibrary mismatch seen on this host.
+- `nemotron_live_streaming`: when Nemotron is selected, feed microphone blocks to ASR during command recording and use that final live transcript instead of running post-WAV STT.
+- `parakeet_model_name`: Hugging Face model id for the Parakeet provider, default `nvidia/parakeet-unified-en-0.6b`.
+- `parakeet_left_context_secs`, `parakeet_chunk_secs`, `parakeet_right_context_secs`: chunked streaming context. `chunk + right` is the theoretical ASR latency.
+- `parakeet_live_streaming`: when Parakeet is selected, feed microphone blocks to ASR during command recording and use that final live transcript instead of running post-WAV STT.
+- `transcript_only_mode`: for shadow/benchmark daemons, stop after STT and archive the transcript without routing to Hermes, TTS, or playback.
+- `prewarm_stt_on_start`: load the active STT path during daemon startup.
 - `playback_sink`: `@DEFAULT_SINK@`, `all`, or a specific Pulse/PipeWire sink name.
 - `visualization_enabled`: open the optional popup window.
 - `visualization_launch_grace_seconds`: how long to wait for a terminal launch to fail before trying the next candidate.
@@ -382,6 +395,55 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `conversation_close_phrases`: phrases that end the voice session.
 - `save_activation_audio`: save wake clips and metadata for later review.
 - `activation_archive_dir`: where activation records are stored.
+
+### Nemotron English streaming STT
+
+The default STT provider remains Hermes' configured STT stack. To test NVIDIA's
+English-only streaming ASR, install NeMo in the same environment that runs the
+daemon, then switch only the wakeword config:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python -m pip install Cython packaging
+~/.hermes/hermes-agent/venv/bin/python -m pip install 'git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]'
+```
+
+```yaml
+stt_provider: nemotron_en_streaming
+nemotron_model_name: nvidia/nemotron-speech-streaming-en-0.6b
+nemotron_device: auto
+nemotron_att_context_size: [70, 13]
+nemotron_cudnn_enabled: false
+nemotron_live_streaming: true
+```
+
+With `nemotron_live_streaming: true`, command capture starts a live Nemotron
+session before opening the microphone stream, feeds accepted mic blocks into
+NeMo as speech is recorded, and uses that final live transcript directly. The
+post-WAV `transcribe_command()` path remains as a fallback when live streaming is
+disabled or produces no transcript. The provider still uses NeMo's
+`CacheAwareStreamingAudioBuffer` and `conformer_stream_step`; it does not call
+offline `model.transcribe`.
+
+### Parakeet Unified English streaming STT
+
+Parakeet Unified is the higher-quality English NVIDIA streaming candidate. It
+uses a chunked RNNT streaming loop with configurable left/chunk/right context:
+
+```yaml
+stt_provider: parakeet_unified_streaming
+parakeet_model_name: nvidia/parakeet-unified-en-0.6b
+parakeet_device: auto
+parakeet_left_context_secs: 2.0
+parakeet_chunk_secs: 0.56
+parakeet_right_context_secs: 0.56
+parakeet_cudnn_enabled: false
+parakeet_live_streaming: true
+```
+
+With the default context, theoretical ASR latency is about 1.12s
+(`chunk + right`). Command capture starts a live Parakeet session before opening
+the microphone stream, feeds accepted mic blocks during recording, and uses the
+final live transcript directly when available.
 
 ### Manual install
 

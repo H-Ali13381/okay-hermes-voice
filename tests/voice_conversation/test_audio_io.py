@@ -112,6 +112,77 @@ def test_record_command_ignores_isolated_spike_before_real_speech(monkeypatch):
     assert not np.any(captured["audio"] == 500)
 
 
+def test_record_command_streams_nemotron_live_during_capture(monkeypatch):
+    block_samples = 1600
+    blocks = [
+        np.zeros((block_samples, 1), dtype=np.int16),
+        *(np.full((block_samples, 1), 900, dtype=np.int16) for _ in range(3)),
+        *(np.zeros((block_samples, 1), dtype=np.int16) for _ in range(4)),
+    ]
+
+    class FakeInputStream:
+        def __init__(self, *args, callback, **kwargs):
+            self.callback = callback
+
+        def __enter__(self):
+            for block in blocks:
+                self.callback(block, len(block), None, None)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeLiveSession:
+        def __init__(self):
+            self.blocks = []
+
+        def accept_int16(self, block):
+            self.blocks.append(np.asarray(block).copy())
+
+        def finalize(self):
+            return "live nemotron transcript"
+
+    live = FakeLiveSession()
+    captured = {}
+
+    def fake_write_wav(audio_data, sample_rate):
+        captured["audio"] = np.asarray(audio_data, dtype=np.int16).copy()
+        captured["sample_rate"] = sample_rate
+        return Path("/tmp/live-captured-command.wav")
+
+    clock = {"now": 0.0}
+
+    def fake_monotonic():
+        clock["now"] += 0.1
+        return clock["now"]
+
+    cfg = dict(daemon_config.DEFAULT_CONFIG)
+    cfg.update(
+        {
+            "stt_provider": "nemotron_en_streaming",
+            "nemotron_live_streaming": True,
+            "block_seconds": 0.1,
+            "speech_rms_threshold": 200,
+            "speech_silence_duration_seconds": 0.3,
+            "speech_start_timeout_seconds": 10.0,
+        }
+    )
+    monkeypatch.setattr(audio_recording.sd, "InputStream", FakeInputStream)
+    monkeypatch.setattr(audio_recording.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(audio_recording, "write_wav_int16", fake_write_wav)
+    monkeypatch.setattr(audio_recording, "start_nemotron_live_streaming", lambda _cfg: live)
+
+    result = audio.record_command(cfg)
+
+    assert isinstance(result, audio_recording.CommandRecording)
+    assert result.path == Path("/tmp/live-captured-command.wav")
+    assert result.live_transcript == "live nemotron transcript"
+    assert captured["sample_rate"] == 16000
+    streamed_maxima = [int(np.max(block)) for block in live.blocks]
+    assert streamed_maxima.count(900) >= 3
+    assert len(live.blocks) > 3
+
+
 def test_play_tts_file_terminates_player_when_cancel_requested(monkeypatch):
     fake_proc = types.SimpleNamespace(
         returncode=None,
