@@ -322,6 +322,56 @@ This section is for users who want to know how it works or tune the system more 
 10. The daemon plays the answer through PulseAudio/PipeWire.
 11. If conversation mode is enabled, the daemon keeps listening for follow-up turns until a close phrase is heard.
 
+### Native PipeWire listener
+
+The user service now starts the native C listener directly for the always-on path. Python is not in `ExecStart` and is not resident while the machine is just waiting for the wakeword.
+
+Native source:
+
+```text
+native/okay-hermes-wake-listener.c
+```
+
+Installed binary:
+
+```text
+~/.hermes/wakeword/bin/okay-hermes-wake-listener
+```
+
+The listener uses direct PipeWire `pw_stream` capture plus the ONNX Runtime C API. The realtime `.process` callback dequeues the PipeWire buffer, does only cheap F32 downmix/resampling into a 16 kHz mono ring buffer, queues the buffer back, and returns. A normal worker thread snapshots the model's 3-second 16 kHz mono input, runs `OrtRun`, applies threshold/consecutive-window gating, and launches the short-lived Python activation handler only after detection.
+
+Build it locally with:
+
+```bash
+PYTHON=~/.hermes/hermes-agent/venv/bin/python \
+  ./native/build_wake_listener.sh --output ~/.hermes/wakeword/bin/okay-hermes-wake-listener
+```
+
+Run a model-only self-test without opening a microphone stream:
+
+```bash
+~/.hermes/wakeword/bin/okay-hermes-wake-listener \
+  --model ~/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx \
+  --self-test
+```
+
+Run a short direct PipeWire capture test without launching Python on activation:
+
+```bash
+~/.hermes/wakeword/bin/okay-hermes-wake-listener \
+  --model ~/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx \
+  --duration-seconds 5 \
+  --verbose
+```
+
+On activation, the service uses:
+
+```text
+okay_hermes_voice.native_activation_handler
+```
+
+That Python process is intentionally short-lived: it records the command, transcribes, invokes Hermes, speaks the answer, then exits so STT/Hermes/CUDA/plugin memory is released instead of staying in the wake listener.
+
 ### Wakeword model
 
 This repository does not bundle model weights. Download the model from:
@@ -356,6 +406,11 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `threshold`: wakeword trigger probability.
 - `trigger_consecutive_windows`: number of positive windows required before activation.
 - `inference_interval_seconds`: CPU/latency tradeoff for ONNX inference.
+- `wake_audio_backend`: legacy Python daemon capture backend; ignored by the native systemd service path.
+- `wake_audio_device`: ALSA/PipeWire device name for the legacy `arecord` backend, default `default`.
+- `native_listener_bin`: installed C wake listener path used by the systemd launcher.
+- `native_pipewire_target`: optional PipeWire target object/node name or id for the native listener.
+- `native_listener_verbose`: print native listener scores to stderr for debugging.
 - `cooldown_seconds`: normal delay before listening again after a completed activation.
 - `cancel_cooldown_seconds`: delay before listening again after popup Ctrl-C cancellation; `0.0` re-arms immediately.
 - `speech_rms_threshold`: rough speech volume threshold while recording a request.

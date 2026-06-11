@@ -10,6 +10,8 @@ from okay_hermes_voice import audio_io as audio
 from okay_hermes_voice import daemon_config as daemon_config
 from okay_hermes_voice import playback
 from okay_hermes_voice.audio import recording as audio_recording
+from okay_hermes_voice.audio.wake import capture as wake_capture
+from okay_hermes_voice.audio.wake.capture import arecord as wake_arecord
 
 
 def test_audio_io_facade_exports_semantic_audio_modules():
@@ -46,6 +48,55 @@ def test_playback_package_facade_exports_response_helpers():
     assert playback.maybe_beep is response_mod.maybe_beep
     assert all(not name.startswith("_") for name in playback.__all__)
     assert not {"contextlib", "json", "subprocess", "threading", "time"} & set(playback.__all__)
+
+
+def test_arecord_wake_blocks_read_raw_s16le_without_sounddevice(monkeypatch):
+    block_samples = 4
+    raw = (np.array([0, 16384, -32768, 32767], dtype="<i2")).tobytes()
+    commands = []
+
+    class FakeStdout:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self, n):
+            self.reads += 1
+            assert n == block_samples * 2
+            if self.reads == 1:
+                return raw
+            return b""
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = FakeStdout()
+            self.terminated = False
+            self.waited = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return 0
+
+        def kill(self):
+            raise AssertionError("clean arecord shutdown should not need kill")
+
+    fake_proc = FakeProc()
+
+    def fake_popen(cmd, stdout, stderr):
+        commands.append(cmd)
+        return fake_proc
+
+    monkeypatch.setattr(wake_arecord.subprocess, "Popen", fake_popen)
+
+    blocks = list(wake_capture.iter_arecord_blocks(sample_rate=16000, block_samples=block_samples, device="default"))
+
+    assert commands == [["arecord", "-q", "-D", "default", "-t", "raw", "-f", "S16_LE", "-r", "16000", "-c", "1"]]
+    assert fake_proc.terminated is True
+    assert fake_proc.waited is True
+    assert len(blocks) == 1
+    np.testing.assert_allclose(blocks[0], np.array([0.0, 0.5, -1.0, 32767 / 32768], dtype=np.float32))
 
 
 def test_record_command_returns_none_without_opening_stream_when_cancelled(monkeypatch):

@@ -10,6 +10,17 @@ cancel_cooldown_seconds: 0.0  # re-arm immediately after Ctrl-C popup cancellati
 sample_rate: 16000
 window_seconds: 3.0
 block_seconds: 0.1
+# Python wakeword capture backend. `sounddevice` preserves the existing PortAudio
+# path; `arecord` moves capture into an ALSA/PipeWire subprocess as an interim
+# low-RSS option while the native PipeWire listener matures.
+wake_audio_backend: sounddevice  # sounddevice, arecord
+wake_audio_device: default
+# Native always-on listener. The systemd service execs this C binary so Python is
+# not resident during idle wakeword listening. The Python activation handler is
+# launched only after the native listener detects the wakeword.
+native_listener_bin: ~/.hermes/wakeword/bin/okay-hermes-wake-listener
+native_pipewire_target: ''
+native_listener_verbose: false
 speech_rms_threshold: 200
 speech_start_consecutive_blocks: 2
 speech_start_timeout_seconds: 15.0

@@ -1,10 +1,10 @@
 [Unit]
-Description=Okay Hermes wakeword activation daemon
+Description=Okay Hermes native wakeword activation listener
 After=pipewire.service pipewire-pulse.service
 
 [Service]
 Type=simple
-ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m okay_hermes_voice.wakeword_daemon --config %h/.hermes/wakeword/config.yaml
+ExecStart=%h/.hermes/wakeword/bin/okay-hermes-wake-listener --model %h/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx --threshold 0.6973556280136108 --consecutive 1 --inference-interval-ms 500 --activation-config %h/.hermes/wakeword/config.yaml
 WorkingDirectory=%h
 Restart=on-failure
 RestartSec=5
