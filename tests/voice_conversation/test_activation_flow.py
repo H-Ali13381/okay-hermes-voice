@@ -27,6 +27,7 @@ from okay_hermes_voice.visualization import (
 )
 from okay_hermes_voice.voice_routing.close_detection import is_close_transcript
 from okay_hermes_voice.voice_routing.status import interaction_ack_text, routed_request_status_message
+from okay_hermes_voice.activation.flow.session_setup import start_activation_session
 
 
 class _TestLog:
@@ -42,7 +43,9 @@ def _fail(message: str):
 
 
 def _launch_to_state(state_path):
-    def launch(_cfg, probability):
+    def launch(_cfg, probability, *, on_process_started=None):
+        if on_process_started:
+            on_process_started()
         update_visualization_state(
             state_path,
             status="listening",
@@ -88,6 +91,29 @@ def _services(**overrides: Any) -> ActivationFlowServices:
 def _handle(services: ActivationFlowServices, cfg: dict[str, Any], activation: Any) -> str:
     services.stop.clear()
     return handle_activation_impl(services, cfg, activation)
+
+
+def test_wake_beep_starts_when_popup_process_starts_not_after_launch_returns(tmp_path):
+    events: list[str] = []
+    state_path = tmp_path / "voice_state.json"
+
+    def launch(_cfg, probability, *, on_process_started=None):
+        events.append("launch-start")
+        assert probability == 0.9
+        if on_process_started:
+            on_process_started()
+        events.append("launch-end")
+        update_visualization_state(state_path, status="wake")
+        return state_path
+
+    services = _services(
+        launch_visualization=launch,
+        maybe_beep=lambda _cfg, frequency, count: events.append(f"beep-{frequency}-{count}"),
+    )
+
+    start_activation_session(services, {}, {"probability": 0.9, "detected_at": 1.0})
+
+    assert events == ["launch-start", "beep-880-1", "launch-end"]
 
 
 def test_handle_activation_surfaces_routing_ack_text_in_popup(tmp_path):
@@ -299,7 +325,9 @@ def test_handle_activation_updates_popup_pipeline_stages(tmp_path):
         if stage and (not stages or stages[-1] != stage):
             stages.append(stage)
 
-    def fake_launch_visualization(_cfg, probability):
+    def fake_launch_visualization(_cfg, probability, *, on_process_started=None):
+        if on_process_started:
+            on_process_started()
         capture_update(
             state_path,
             status="wake",

@@ -46,12 +46,24 @@ def start_activation_session(
     }
     deps.log.info("Handling wake activation; probability=%.6f", probability)
     activation_archive = deps.save_activation_archive(cfg, normalized)
-    visual_state = deps.launch_visualization(cfg, probability)
+    beep_played = False
+
+    def beep_on_popup_process_started() -> None:
+        nonlocal beep_played
+        beep_played = True
+        deps.maybe_beep(cfg, frequency=880, count=1)
+
+    visual_state = deps.launch_visualization(
+        cfg,
+        probability,
+        on_process_started=beep_on_popup_process_started,
+    )
     deps.update_visualization_state(visual_state, voice_session_timing=voice_session_timing)
     deps.update_activation_archive_metadata(activation_archive, voice_session_timing=voice_session_timing)
     if activation_archive:
         deps.update_visualization_state(visual_state, activation_archive=activation_archive)
-    deps.maybe_beep(cfg, frequency=880, count=1)
+    if not beep_played:
+        deps.maybe_beep(cfg, frequency=880, count=1)
     return ActivationSession(
         activation=normalized,
         probability=probability,

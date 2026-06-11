@@ -411,6 +411,9 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `native_listener_bin`: installed C wake listener path used by the systemd launcher.
 - `native_pipewire_target`: optional PipeWire target object/node name or id for the native listener.
 - `native_listener_verbose`: print native listener scores to stderr for debugging.
+- `native_activation_server_enabled`: proxy native detections to the warm Python sidecar instead of starting a cold one-shot handler.
+- `native_activation_socket`: Unix socket path for the warm native activation sidecar.
+- `native_activation_server_timeout_seconds`: connect/read timeout for the native listener's short proxy process.
 - `cooldown_seconds`: normal delay before listening again after a completed activation.
 - `cancel_cooldown_seconds`: delay before listening again after popup Ctrl-C cancellation; `0.0` re-arms immediately.
 - `speech_rms_threshold`: rough speech volume threshold while recording a request.

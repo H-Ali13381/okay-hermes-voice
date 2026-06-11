@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from ...daemon_config import LOG
 from .. import state
@@ -18,7 +18,12 @@ from .process_output import _visualization_failure_message
 from .process_watch import _watch_visualization_process
 
 
-def launch_visualization(cfg: Dict[str, Any], probability: float) -> Optional[Path]:
+def launch_visualization(
+    cfg: Dict[str, Any],
+    probability: float,
+    *,
+    on_process_started: Optional[Callable[[], None]] = None,
+) -> Optional[Path]:
     """Open a non-blocking terminal window for the current voice activation."""
     if not cfg.get("visualization_enabled", True):
         return None
@@ -48,10 +53,20 @@ def launch_visualization(cfg: Dict[str, Any], probability: float) -> Optional[Pa
     env = _visualization_launch_env(os.environ.copy())
     launch_grace_seconds = float(cfg.get("visualization_launch_grace_seconds") or VISUALIZATION_LAUNCH_GRACE_SECONDS)
     last_error = ""
+    process_started_notified = False
+
+    def notify_process_started() -> None:
+        nonlocal process_started_notified
+        if process_started_notified or on_process_started is None:
+            return
+        process_started_notified = True
+        on_process_started()
+
     for cmd in commands:
         terminal_label = Path(cmd[0]).name
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(Path.home()), env=env, start_new_session=True, text=True)
+            notify_process_started()
             try:
                 stdout, stderr, returncode = _communicate_or_wait(proc, timeout=launch_grace_seconds)
             except (subprocess.TimeoutExpired, TimeoutError):

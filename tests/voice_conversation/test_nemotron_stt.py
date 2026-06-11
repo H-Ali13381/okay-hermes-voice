@@ -282,7 +282,9 @@ def test_activation_flow_passes_daemon_config_to_stt(monkeypatch, tmp_path):
     command_path.write_bytes(b"fake wav")
     seen = []
 
-    def fake_launch_visualization(_cfg, probability):
+    def fake_launch_visualization(_cfg, probability, *, on_process_started=None):
+        if on_process_started:
+            on_process_started()
         update_visualization_state(
             state_path,
             status="listening",

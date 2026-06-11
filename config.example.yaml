@@ -21,6 +21,11 @@ wake_audio_device: default
 native_listener_bin: ~/.hermes/wakeword/bin/okay-hermes-wake-listener
 native_pipewire_target: ''
 native_listener_verbose: false
+# Optional low-latency sidecar for the native listener: keep STT and Hermes
+# initialized in one Python process while the always-on wake detector stays C.
+native_activation_server_enabled: false
+native_activation_socket: ~/.hermes/wakeword/native-handler.sock
+native_activation_server_timeout_seconds: 5.0
 speech_rms_threshold: 200
 speech_start_consecutive_blocks: 2
 speech_start_timeout_seconds: 15.0

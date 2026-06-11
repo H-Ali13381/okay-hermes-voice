@@ -13,6 +13,8 @@ STRUCTURE_EXEMPTIONS = {
     Path("okay_hermes_voice/hermes_agent_cache.py"),
     Path("okay_hermes_voice/hermes_runtime.py"),
     Path("okay_hermes_voice/interaction_types.py"),
+    Path("okay_hermes_voice/native_activation_handler.py"),
+    Path("okay_hermes_voice/native_activation_server.py"),
     Path("okay_hermes_voice/wakeword_daemon.py"),
 }
 
