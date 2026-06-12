@@ -21,6 +21,14 @@ def test_user_service_execs_native_binary_not_python_launcher():
     assert "--handler-command" not in exec_start
 
 
+def test_user_service_retries_when_pipewire_capture_nodes_are_late():
+    service = (REPO_ROOT / "systemd" / "hermes-wakeword.service").read_text(encoding="utf-8")
+
+    assert "Wants=pipewire.service pipewire-pulse.service wireplumber.service" in service
+    assert "After=pipewire.service pipewire-pulse.service wireplumber.service" in service
+    assert "Restart=always" in service
+
+
 def test_native_activation_handler_reads_activation_json(monkeypatch):
     monkeypatch.setattr(sys, "stdin", type("FakeStdin", (), {"read": lambda self: json.dumps({"probability": 0.8})})())
 
