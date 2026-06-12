@@ -60,6 +60,15 @@ Install and start the background service:
 ./scripts/install_user_service.sh
 ```
 
+Optional native C++/Qt6 system tray toggle:
+
+```bash
+./scripts/install_wakeword_tray.sh
+~/.local/bin/okay-hermes-wakeword-tray &
+```
+
+The tray app is a small native binary with a persistent ON/OFF icon, a yellow animated loading icon while starting/stopping, and a right-click menu with `Turn ON`, `Turn OFF`, and `Exit`. The installer also adds `~/.config/autostart/okay-hermes-wakeword-tray.desktop` so it starts with your desktop session.
+
 The installer will:
 
 - install this package into the Hermes Python environment;

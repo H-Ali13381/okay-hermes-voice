@@ -31,6 +31,23 @@ def native_activation_socket_path(cfg: Dict[str, Any]) -> Path:
     return Path(str(raw)).expanduser()
 
 
+def native_activation_ready_path(cfg: Dict[str, Any]) -> Path:
+    return native_activation_socket_path(cfg).with_suffix(".ready")
+
+
+def mark_ready(cfg: Dict[str, Any]) -> None:
+    ready_path = native_activation_ready_path(cfg)
+    ready_path.parent.mkdir(parents=True, exist_ok=True)
+    ready_path.write_text("ready\n", encoding="utf-8")
+
+
+def clear_ready(cfg: Dict[str, Any]) -> None:
+    try:
+        native_activation_ready_path(cfg).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def prewarm_runtime(cfg: Dict[str, Any]) -> None:
     """Load the expensive post-wake runtimes in this long-lived process."""
     prewarm_stt(cfg)
@@ -105,28 +122,33 @@ def _serve_once(server: socket.socket, cfg: Dict[str, Any], state: ActivationSer
 def serve(cfg: Dict[str, Any]) -> int:
     socket_path = native_activation_socket_path(cfg)
     socket_path.parent.mkdir(parents=True, exist_ok=True)
+    clear_ready(cfg)
     try:
         socket_path.unlink()
     except FileNotFoundError:
         pass
 
     state = ActivationServerState()
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
-        server.bind(str(socket_path))
-        os.chmod(socket_path, 0o600)
-        server.listen(1)
-        server.settimeout(0.5)
-        LOG.info("Warm native activation server listening on %s", socket_path)
-        prewarm_runtime(cfg)
-        while not STOP.is_set():
-            try:
-                _serve_once(server, cfg, state)
-            except socket.timeout:
-                continue
     try:
-        socket_path.unlink()
-    except FileNotFoundError:
-        pass
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            server.listen(1)
+            server.settimeout(0.5)
+            LOG.info("Warm native activation server listening on %s", socket_path)
+            prewarm_runtime(cfg)
+            mark_ready(cfg)
+            while not STOP.is_set():
+                try:
+                    _serve_once(server, cfg, state)
+                except socket.timeout:
+                    continue
+    finally:
+        clear_ready(cfg)
+        try:
+            socket_path.unlink()
+        except FileNotFoundError:
+            pass
     return 0
 
 

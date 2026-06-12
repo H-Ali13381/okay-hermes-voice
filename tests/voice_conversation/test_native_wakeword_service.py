@@ -86,6 +86,27 @@ def test_native_activation_server_prewarms_before_accepting_connections(monkeypa
     assert calls == [("stt", cfg), ("hermes", cfg)]
 
 
+def test_native_activation_server_readiness_marker_is_socket_scoped(tmp_path):
+    from okay_hermes_voice import native_activation_server
+
+    cfg = {"native_activation_socket": str(tmp_path / "handler.sock")}
+
+    assert native_activation_server.native_activation_ready_path(cfg) == tmp_path / "handler.ready"
+
+
+def test_native_activation_server_writes_and_removes_readiness_marker(tmp_path):
+    from okay_hermes_voice import native_activation_server
+
+    cfg = {"native_activation_socket": str(tmp_path / "handler.sock")}
+    ready_path = tmp_path / "handler.ready"
+
+    native_activation_server.mark_ready(cfg)
+    assert ready_path.read_text(encoding="utf-8").strip() == "ready"
+
+    native_activation_server.clear_ready(cfg)
+    assert not ready_path.exists()
+
+
 def test_native_activation_server_drops_queued_activation_from_active_session(monkeypatch):
     from okay_hermes_voice import native_activation_server
 
