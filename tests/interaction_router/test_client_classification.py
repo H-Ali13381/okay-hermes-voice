@@ -10,6 +10,10 @@ from okay_hermes_voice.interaction_router import (
     classify_request,
     classify_with_client,
 )
+from okay_hermes_voice.interaction_clients.router_prewarm import (
+    clear_prewarmed_router,
+    prewarm_interaction_router,
+)
 
 from .fakes import FakeClient
 
@@ -65,6 +69,43 @@ def test_classify_request_uses_hermes_provider_client(monkeypatch):
 
     assert decision.route_target is RouteTarget.SMALL_MODEL
     assert fake_client.chat.completions.kwargs["model"] == "google/gemini-2.5-flash-lite"
+
+def test_classify_request_reuses_prewarmed_router_client(monkeypatch):
+    fake_client = FakeClient(
+        json.dumps(
+            {
+                "request_complexity": "simple",
+                "route_target": "small_model",
+                "ack_template_id": "none",
+                "tool_risk": "none",
+                "confidence": 0.95,
+            }
+        )
+    )
+    resolve_calls = []
+
+    def resolve_provider_client(provider, model=None):
+        resolve_calls.append((provider, model))
+        return fake_client, model
+
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.auxiliary_client",
+        types.SimpleNamespace(resolve_provider_client=resolve_provider_client),
+    )
+    cfg = InteractionRouterConfig(router_provider="openrouter", router_model="router-model")
+
+    try:
+        assert prewarm_interaction_router(cfg) is True
+        assert classify_request("tell me a fun fact", cfg).route_target is RouteTarget.SMALL_MODEL
+        assert classify_request("say hello", cfg).route_target is RouteTarget.SMALL_MODEL
+    finally:
+        clear_prewarmed_router()
+
+    assert resolve_calls == [("openrouter", "router-model")]
+    kwargs = fake_client.chat.completions.kwargs
+    assert kwargs is not None
+    assert kwargs["model"] == "router-model"
 
 def test_answer_with_small_model_uses_configured_small_model_client(monkeypatch):
     from okay_hermes_voice.interaction_router import answer_with_small_model

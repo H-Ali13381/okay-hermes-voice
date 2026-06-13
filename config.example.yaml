@@ -62,6 +62,9 @@ hermes_prompt_prefix: >-
 # simple requests to a small model when enabled, and falls back conservatively to
 # the warm Hermes agent for tools, memory, external data, or uncertainty.
 interaction_router_enabled: true
+# Resolve/cache the router provider client during warm-handler startup. This
+# removes first-turn provider setup without sending a dummy classification call.
+prewarm_router_on_start: true
 interaction_router_provider: openrouter
 interaction_router_model: google/gemini-2.5-flash-lite
 interaction_router_timeout_seconds: 1.5

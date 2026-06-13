@@ -66,6 +66,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "and mention uncertainty when it matters. Keep spoken answers concise unless the task requires depth."
     ),
     "interaction_router_enabled": True,
+    "prewarm_router_on_start": True,
     "interaction_router_provider": "openrouter",
     "interaction_router_model": "google/gemini-2.5-flash-lite",
     "interaction_router_timeout_seconds": 1.5,

@@ -15,6 +15,8 @@ from .activation_flow import handle_activation
 from .daemon_config import CONFIG_PATH, LOG, STOP, load_config, setup_logging, signal_handler
 from .audio import prewarm_stt
 from .hermes_runtime import prewarm_hermes
+from .interaction_clients import prewarm_interaction_router
+from .voice_routing.router_config import interaction_router_config_from_daemon_config
 
 DEFAULT_SOCKET_NAME = "native-handler.sock"
 
@@ -52,6 +54,33 @@ def prewarm_runtime(cfg: Dict[str, Any]) -> None:
     """Load the expensive post-wake runtimes in this long-lived process."""
     prewarm_stt(cfg)
     prewarm_hermes(cfg)
+    if not cfg.get("prewarm_router_on_start", True):
+        return
+    router_cfg = interaction_router_config_from_daemon_config(cfg)
+    if not router_cfg.router_enabled:
+        return
+    started = time.monotonic()
+    try:
+        router_ready = prewarm_interaction_router(router_cfg)
+    except Exception as exc:  # pragma: no cover - depends on provider/auth environment
+        LOG.warning(
+            "Interaction router client prewarm failed in %.2fs provider=%s model=%s error=%s: %s",
+            time.monotonic() - started,
+            router_cfg.router_provider,
+            router_cfg.router_model,
+            type(exc).__name__,
+            exc,
+        )
+        return
+    if router_ready:
+        LOG.info("Interaction router client prewarm complete in %.2fs", time.monotonic() - started)
+    else:
+        LOG.warning(
+            "Interaction router client prewarm skipped in %.2fs provider=%s model=%s",
+            time.monotonic() - started,
+            router_cfg.router_provider,
+            router_cfg.router_model,
+        )
 
 
 def _activation_detected_at(activation: Dict[str, Any]) -> float:

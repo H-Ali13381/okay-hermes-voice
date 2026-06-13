@@ -80,7 +80,10 @@ def test_native_activation_handler_does_not_fallback_locally_when_warm_server_is
 def test_native_activation_server_prewarms_before_accepting_connections(monkeypatch, tmp_path):
     from okay_hermes_voice import native_activation_server
 
+    from okay_hermes_voice.interaction_router import InteractionRouterConfig
+
     calls = []
+    router_cfg = InteractionRouterConfig(router_provider="openrouter", router_model="router-model")
     cfg = {
         "native_activation_socket": str(tmp_path / "handler.sock"),
         "prewarm_stt_on_start": True,
@@ -88,10 +91,20 @@ def test_native_activation_server_prewarms_before_accepting_connections(monkeypa
     }
     monkeypatch.setattr(native_activation_server, "prewarm_stt", lambda config: calls.append(("stt", config)))
     monkeypatch.setattr(native_activation_server, "prewarm_hermes", lambda config: calls.append(("hermes", config)))
+    monkeypatch.setattr(
+        native_activation_server,
+        "interaction_router_config_from_daemon_config",
+        lambda config: router_cfg,
+    )
+    monkeypatch.setattr(
+        native_activation_server,
+        "prewarm_interaction_router",
+        lambda router_cfg: calls.append(("router", router_cfg)),
+    )
 
     native_activation_server.prewarm_runtime(cfg)
 
-    assert calls == [("stt", cfg), ("hermes", cfg)]
+    assert calls == [("stt", cfg), ("hermes", cfg), ("router", router_cfg)]
 
 
 def test_native_activation_server_readiness_marker_is_socket_scoped(tmp_path):
