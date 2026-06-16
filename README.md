@@ -327,9 +327,10 @@ This section is for users who want to know how it works or tune the system more 
 6. The interaction router classifies the transcript and schedules any short acknowledgement clip (for example “Okay, I’m on it.”) asynchronously, so the full Hermes agent can start immediately instead of waiting for the clip to finish.
 7. The request goes to a warm in-process Hermes Agent for lower latency than launching a new CLI process each time.
 8. Hermes generates a response with the user's normal model/provider/toolsets.
-9. Hermes TTS creates spoken audio.
-10. The daemon plays the answer through PulseAudio/PipeWire.
-11. If conversation mode is enabled, the daemon keeps listening for follow-up turns until a close phrase is heard.
+9. If the request is complex and the router elects to split work, Hermes should use built-in async background delegation (`delegate_task(background=true)`) so the voice thread can keep talking while a text-only subagent works.
+10. Hermes TTS creates spoken audio.
+11. The daemon plays the answer through PulseAudio/PipeWire.
+12. If conversation mode is enabled, the daemon keeps listening for follow-up turns until a close phrase is heard.
 
 ### Native PipeWire listener
 
