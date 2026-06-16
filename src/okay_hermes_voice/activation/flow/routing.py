@@ -1,6 +1,7 @@
 """Route, answer, and speak normal activation requests."""
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List
 
 from .constants import VOICE_SESSION_CANCELLED, VOICE_SESSION_COMPLETED
@@ -51,8 +52,18 @@ class RoutedTurnHandler:
             error="",
             current_turn=turn_index,
         )
+        answer_ready = threading.Event()
+
+        def ack_cancel_requested() -> bool:
+            return answer_ready.is_set() or self.voice_cancel_requested()
+
         route_started = self.deps.time.monotonic()
-        interaction_plan = self.deps.route_transcribed_request(self.cfg, transcript, cancel_check=self.voice_cancel_requested)
+        interaction_plan = self.deps.route_transcribed_request(
+            self.cfg,
+            transcript,
+            cancel_check=ack_cancel_requested,
+            loop_ack_until_cancelled=True,
+        )
         turn_timing["route_seconds"] = elapsed_seconds(self.deps.time, route_started)
         if self.stop_if_cancelled():
             return VOICE_SESSION_CANCELLED, hermes_history, False
@@ -89,13 +100,16 @@ class RoutedTurnHandler:
         if self.stop_if_cancelled():
             return VOICE_SESSION_CANCELLED, hermes_history, False
         answer_started = self.deps.time.monotonic()
-        response, hermes_history, response_source = self.deps.answer_routed_request(
-            self.cfg,
-            transcript,
-            interaction_plan,
-            hermes_history,
-            cancel_check=self.voice_cancel_requested,
-        )
+        try:
+            response, hermes_history, response_source = self.deps.answer_routed_request(
+                self.cfg,
+                transcript,
+                interaction_plan,
+                hermes_history,
+                cancel_check=self.voice_cancel_requested,
+            )
+        finally:
+            answer_ready.set()
         turn_timing["answer_seconds"] = elapsed_seconds(self.deps.time, answer_started)
         if self.stop_if_cancelled():
             return VOICE_SESSION_CANCELLED, hermes_history, False

@@ -148,6 +148,52 @@ def test_handle_activation_surfaces_routing_ack_text_in_popup(tmp_path):
     _handle(services, {"conversation_mode_enabled": False}, {"probability": 0.9})
 
 
+def test_handle_activation_stops_looping_ack_when_answer_is_ready(tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+    ack_cancel_check = None
+    route_kwargs = None
+    decision = router.RouterDecision(confidence=0.0)
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.GOT_IT,
+        "low_router_confidence",
+    )
+    plan = wake.VoiceRequestPlan("what is the weather", decision, route)
+
+    def fake_route_transcribed_request(_cfg, _transcript, **kwargs):
+        nonlocal ack_cancel_check, route_kwargs
+        route_kwargs = kwargs
+        ack_cancel_check = kwargs["cancel_check"]
+        assert ack_cancel_check() is False
+        return plan
+
+    def fake_answer_routed_request(_cfg, _transcript, _plan, history, *, cancel_check):
+        assert ack_cancel_check is not None
+        assert ack_cancel_check() is False
+        assert cancel_check() is False
+        return "spoken answer", history, "heavy_agent"
+
+    def fake_speak_response(_cfg, _text, **_kwargs):
+        assert ack_cancel_check is not None
+        assert ack_cancel_check() is True
+
+    services = _services(
+        launch_visualization=_launch_to_state(state_path),
+        record_command=lambda *_args, **_kwargs: command_path,
+        transcribe_command=lambda *_args, **_kwargs: "what is the weather",
+        route_transcribed_request=fake_route_transcribed_request,
+        answer_routed_request=fake_answer_routed_request,
+        speak_response=fake_speak_response,
+    )
+
+    _handle(services, {"conversation_mode_enabled": False}, {"probability": 0.9})
+
+    assert route_kwargs is not None
+    assert route_kwargs["loop_ack_until_cancelled"] is True
+
+
 def test_handle_activation_passes_popup_cancel_check_to_response_playback(tmp_path):
     state_path = tmp_path / "voice_state.json"
     command_path = tmp_path / "command.wav"
@@ -396,8 +442,9 @@ def test_handle_activation_records_phase_zero_timing_in_popup_and_archive(tmp_pa
         advance(0.5)
         return "time this request"
 
-    def fake_route_transcribed_request(_cfg, transcript, *, cancel_check):
+    def fake_route_transcribed_request(_cfg, transcript, *, cancel_check, loop_ack_until_cancelled=False):
         assert transcript == "time this request"
+        assert loop_ack_until_cancelled is True
         assert cancel_check() is False
         advance(0.25)
         return None

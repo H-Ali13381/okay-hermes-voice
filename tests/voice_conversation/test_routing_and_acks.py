@@ -7,6 +7,7 @@ import time
 from okay_hermes_voice import interaction_router as router
 from okay_hermes_voice import voice_routing as routing
 from okay_hermes_voice import wakeword_daemon as wake
+from okay_hermes_voice.voice_routing import ack_playback
 
 
 def test_interaction_router_config_from_daemon_config_maps_prefixed_keys():
@@ -104,6 +105,57 @@ def test_route_transcribed_request_plays_immediate_ack(monkeypatch):
 
     assert routing.route_transcribed_request({}, "inspect the repo") is plan
     assert played == [(wake.AckTemplate.CHECKING, False)]
+
+
+def test_route_transcribed_request_can_schedule_looping_ack(monkeypatch):
+    decision = router.RouterDecision(confidence=0.9)
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.CHECKING,
+        "router_heavy_agent",
+    )
+    plan = wake.VoiceRequestPlan("inspect the repo", decision, route)
+    played = []
+
+    monkeypatch.setattr(routing, "plan_interaction_route", lambda cfg, transcript: plan)
+    monkeypatch.setattr(
+        routing,
+        "play_interaction_ack",
+        lambda cfg, template, **kwargs: played.append(
+            (template, kwargs.get("block"), kwargs.get("loop_until_cancelled"))
+        ) or True,
+    )
+
+    assert routing.route_transcribed_request({}, "inspect the repo", loop_ack_until_cancelled=True) is plan
+    assert played == [(wake.AckTemplate.CHECKING, False, True)]
+
+
+def test_play_interaction_ack_repeats_until_cancelled(monkeypatch):
+    calls = 0
+    finished = threading.Event()
+
+    def fake_play(_cfg, template_id, *, cancel_check=None):
+        nonlocal calls
+        assert template_id is wake.AckTemplate.CHECKING
+        assert cancel_check is not None
+        calls += 1
+        if calls >= 3:
+            finished.set()
+        return True
+
+    monkeypatch.setattr(ack_playback, "_play_interaction_ack_sync", fake_play)
+
+    assert routing.play_interaction_ack(
+        {},
+        wake.AckTemplate.CHECKING,
+        cancel_check=lambda: finished.is_set(),
+        block=False,
+        loop_until_cancelled=True,
+    ) is True
+
+    assert finished.wait(timeout=1.0)
+    assert calls >= 3
+
 
 def test_route_transcribed_request_schedules_heavy_ack_without_blocking(monkeypatch, tmp_path):
     decision = router.RouterDecision(confidence=0.9)
