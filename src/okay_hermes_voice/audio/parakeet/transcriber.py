@@ -47,6 +47,7 @@ class ParakeetStreamingTranscriber:
         model.eval()
         if hasattr(model, "change_decoding_strategy") and hasattr(model, "cfg") and hasattr(model.cfg, "decoding"):
             model.change_decoding_strategy(model.cfg.decoding)
+            self._ensure_streaming_decoding_strategy(model)
         if hasattr(model, "preprocessor") and hasattr(model.preprocessor, "featurizer"):
             model.preprocessor.featurizer.dither = 0.0
             model.preprocessor.featurizer.pad_to = 0
@@ -62,6 +63,9 @@ class ParakeetStreamingTranscriber:
         self._loaded = True
 
     def transcribe_file(self, path: Path) -> str:
+        self.load()
+        if not self._supports_live_decoding():
+            return self._transcribe_file_batch(path)
         session = self.start_live_session()
         audio = load_mono_audio_samples(path)
         chunk_samples = max(1, int(session.sample_rate * self.cfg.chunk_secs))
@@ -84,6 +88,46 @@ class ParakeetStreamingTranscriber:
         assert self._device is not None
         amp_device = "cuda" if getattr(self._device, "type", str(self._device)) == "cuda" else "cpu"
         return self._torch.amp.autocast(amp_device, dtype=self._amp_dtype, enabled=bool(self.cfg.amp))
+
+    def _supports_live_decoding(self) -> bool:
+        return self._model_has_live_decoding(self._model)
+
+    @staticmethod
+    def _model_has_live_decoding(model: Any) -> bool:
+        decoding = getattr(getattr(model, "decoding", None), "decoding", None)
+        return hasattr(decoding, "decoding_computer")
+
+    def _ensure_streaming_decoding_strategy(self, model: Any) -> None:
+        if self._model_has_live_decoding(model):
+            return
+        decoding_cfg = getattr(getattr(model, "cfg", None), "decoding", None)
+        if decoding_cfg is None or not hasattr(model, "change_decoding_strategy"):
+            return
+        model_type = str(getattr(decoding_cfg, "model_type", "")).lower()
+        if model_type != "tdt":
+            return
+        from omegaconf import open_dict  # type: ignore[import-not-found]
+
+        streaming_cfg = decoding_cfg.copy()
+        with open_dict(streaming_cfg):
+            streaming_cfg.strategy = "greedy_batch"
+            streaming_cfg.fused_batch_size = -1
+            streaming_cfg.tdt_include_token_duration = False
+            streaming_cfg.greedy.loop_labels = True
+            streaming_cfg.greedy.preserve_alignments = False
+        LOG.info("Switching Parakeet TDT decoding to greedy_batch label-looping for live streaming")
+        model.change_decoding_strategy(streaming_cfg)
+
+    def _transcribe_file_batch(self, path: Path) -> str:
+        assert self._model is not None
+        LOG.info("Parakeet model does not expose live decoding; using batch transcription for %s", path)
+        output = self._model.transcribe([str(path)], batch_size=1, return_hypotheses=False)
+        first = output[0] if isinstance(output, (list, tuple)) else output
+        if hasattr(first, "text"):
+            return str(first.text).strip()
+        if isinstance(first, dict) and "text" in first:
+            return str(first["text"]).strip()
+        return str(first).strip()
 
     @staticmethod
     def _resolve_amp_dtype(torch: Any, name: str) -> Any:

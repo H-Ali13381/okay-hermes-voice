@@ -3,12 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 import types
 
+from omegaconf import OmegaConf  # type: ignore[import-not-found]
+
 import numpy as np
 
 from okay_hermes_voice import daemon_config
 from okay_hermes_voice.audio import parakeet_stt
 from okay_hermes_voice.audio import recording as audio_recording
 from okay_hermes_voice.audio import transcription
+from okay_hermes_voice.audio.parakeet.transcriber import ParakeetStreamingTranscriber
+from okay_hermes_voice.audio.parakeet_config import ParakeetStreamingConfig
 
 
 def test_parakeet_provider_dispatches_post_wav_stt_without_hermes(monkeypatch, tmp_path):
@@ -181,6 +185,62 @@ def test_record_command_starts_parakeet_live_streaming(monkeypatch):
     assert result.live_transcript == "final parakeet transcript"
     assert captured["sample_rate"] == 16000
     assert len(live.blocks) > 3
+
+
+def test_parakeet_tdt_switches_to_streaming_label_looping_decoder():
+    seen = []
+
+    class FakeModel:
+        def __init__(self):
+            self.cfg = types.SimpleNamespace(
+                decoding=OmegaConf.create(
+                    {
+                        "model_type": "tdt",
+                        "strategy": "greedy",
+                        "fused_batch_size": None,
+                        "tdt_include_token_duration": None,
+                        "greedy": {"loop_labels": False, "preserve_alignments": True},
+                    }
+                )
+            )
+            self.decoding = types.SimpleNamespace(decoding=types.SimpleNamespace())
+
+        def change_decoding_strategy(self, cfg):
+            seen.append(cfg)
+            if cfg.strategy == "greedy_batch":
+                self.decoding = types.SimpleNamespace(
+                    decoding=types.SimpleNamespace(decoding_computer=object())
+                )
+
+    model = FakeModel()
+    transcriber = ParakeetStreamingTranscriber(ParakeetStreamingConfig(model_name="nvidia/parakeet-tdt-1.1b"))
+
+    transcriber._ensure_streaming_decoding_strategy(model)
+
+    assert seen[-1].strategy == "greedy_batch"
+    assert seen[-1].greedy.loop_labels is True
+    assert transcriber._model_has_live_decoding(model) is True
+
+
+def test_parakeet_batch_fallback_handles_tdt_decoders_without_live_computer(monkeypatch, tmp_path):
+    command = tmp_path / "command.wav"
+    command.write_bytes(b"fake wav")
+    calls = []
+
+    class FakeModel:
+        decoding = types.SimpleNamespace(decoding=types.SimpleNamespace())
+
+        def transcribe(self, paths, batch_size=1, return_hypotheses=False):
+            calls.append((paths, batch_size, return_hypotheses))
+            return [types.SimpleNamespace(text="batch tdt transcript")]
+
+    transcriber = ParakeetStreamingTranscriber(ParakeetStreamingConfig(model_name="nvidia/parakeet-tdt-1.1b"))
+    transcriber._loaded = True
+    transcriber._model = FakeModel()
+    monkeypatch.setattr(transcriber, "load", lambda: None)
+
+    assert transcriber.transcribe_file(command) == "batch tdt transcript"
+    assert calls == [([str(command)], 1, False)]
 
 
 def test_default_config_documents_parakeet_streaming_alternative():
