@@ -30,6 +30,8 @@ else
   echo "Keeping existing $hermes_home/wakeword/config.yaml"
 fi
 
+"$python_bin" "$repo_dir/scripts/generate_loading_ack.py" --output-dir "$hermes_home/wakeword/ack_cache"
+
 PYTHON="$python_bin" "$repo_dir/native/build_wake_listener.sh" --output "$hermes_home/wakeword/bin/okay-hermes-wake-listener"
 
 cp "$repo_dir/systemd/hermes-wakeword.service" "$HOME/.config/systemd/user/hermes-wakeword.service"

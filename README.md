@@ -442,7 +442,7 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `interaction_router_model`: fast structured router model, defaulting to Gemini Flash Lite.
 - `interaction_router_min_confidence`: below this, route conservatively to the full Hermes agent.
 - `interaction_router_small_model_enabled`: allow simple/safe requests to bypass the full agent.
-- `interaction_router_ack_cache_enabled`: cache short acknowledgement clips like “Okay, I’m on it.” Cached files preserve the TTS provider's audio extension, and acknowledgements are played asynchronously before full-agent work.
+- `interaction_router_ack_cache_enabled`: cache short acknowledgement clips. The installer seeds a soft local loading-motif acknowledgement for the router ack templates, cached files preserve the TTS provider's audio extension, and acknowledgements are played asynchronously before full-agent work.
 - `beep_enabled`: play short local beeps for wake/listening/error feedback.
 - `stt_provider`: `hermes` keeps the normal Hermes STT stack; `nemotron_en_streaming` enables NVIDIA Nemotron English-only cache-aware streaming ASR; `parakeet_unified_streaming` enables NVIDIA Parakeet Unified English streaming ASR.
 - `nemotron_model_name`: Hugging Face model id for the Nemotron provider, default `nvidia/nemotron-speech-streaming-en-0.6b`.
