@@ -51,6 +51,7 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
     threshold = float(cfg["speech_rms_threshold"])
     start_timeout = float(cfg["speech_start_timeout_seconds"])
     silence_duration = float(cfg["speech_silence_duration_seconds"])
+    streamed_text_idle_duration = float(cfg.get("streamed_text_idle_duration_seconds", 0.0) or 0.0)
     max_seconds = float(cfg["max_command_seconds"])
     min_seconds = float(cfg["min_command_seconds"])
     start_consecutive_blocks = max(1, int(cfg.get("speech_start_consecutive_blocks") or 1))
@@ -60,6 +61,8 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
     preroll: Deque[np.ndarray] = collections.deque(maxlen=max(1, int(0.4 / float(cfg["block_seconds"]))))
     live_session = None
     live_transcript = ""
+    last_streamed_text = ""
+    last_streamed_text_update_time: Optional[float] = None
     started = False
     start_time = time.monotonic()
     speech_start_time: Optional[float] = None
@@ -73,6 +76,13 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
         block = np.asarray(indata[:, 0], dtype=np.int16).copy()
         with contextlib.suppress(queue.Full):
             audio_q.put_nowait(block)
+
+    def note_live_transcript(transcript: str, timestamp: float) -> None:
+        nonlocal last_streamed_text, last_streamed_text_update_time
+        normalized = " ".join((transcript or "").split())
+        if normalized and normalized != last_streamed_text:
+            last_streamed_text = normalized
+            last_streamed_text_update_time = timestamp
 
     if _cancel_check_requested(cancel_check):
         LOG.info("Command recording cancelled before audio stream opened")
@@ -107,6 +117,7 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
                 block = audio_q.get(timeout=0.5)
             except queue.Empty:
                 continue
+            now = time.monotonic()
 
             level = rms_int16(block)
             has_voice = level >= threshold
@@ -122,6 +133,7 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
                         if live_session is not None:
                             for buffered_block in preroll:
                                 live_transcript = live_session.accept_int16(buffered_block)
+                                note_live_transcript(live_transcript, now)
                         LOG.info(
                             "Speech started; rms=%.1f consecutive_blocks=%d",
                             level,
@@ -136,7 +148,16 @@ def record_command(cfg: Dict[str, Any], cancel_check: Optional[Callable[[], bool
             chunks.append(block)
             if live_session is not None:
                 live_transcript = live_session.accept_int16(block)
-            if last_voice_time is not None and now - last_voice_time >= silence_duration:
+                note_live_transcript(live_transcript, now)
+            using_streamed_text_endpointing = (
+                live_session is not None and streamed_text_idle_duration > 0 and last_streamed_text_update_time is not None
+            )
+            if using_streamed_text_endpointing:
+                assert last_streamed_text_update_time is not None
+                if now - last_streamed_text_update_time >= streamed_text_idle_duration:
+                    LOG.info("Speech ended after %.1fs without streamed text changes", streamed_text_idle_duration)
+                    break
+            if not using_streamed_text_endpointing and last_voice_time is not None and now - last_voice_time >= silence_duration:
                 LOG.info("Speech ended after %.1fs silence", silence_duration)
                 break
 
