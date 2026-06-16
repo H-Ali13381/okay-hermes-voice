@@ -20,5 +20,6 @@ config.yaml
 
 # Other local files
 .vscode/
+.hermes/
 hermes_full_duplex_threaded_voice_plan.md
 hermes_full_duplex_threaded_voice_plan_review.html
