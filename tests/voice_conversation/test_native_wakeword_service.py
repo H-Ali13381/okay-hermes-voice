@@ -15,7 +15,9 @@ def test_user_service_execs_native_binary_not_python_launcher():
     exec_start = next(line for line in service.splitlines() if line.startswith("ExecStart="))
 
     assert "okay-hermes-wake-listener" in exec_start
-    assert "--activation-config" in exec_start
+    assert "--hermes-home %h/.hermes" in exec_start
+    assert "--activation-config" not in exec_start
+    assert " --model " not in exec_start
     assert "python" not in exec_start.lower()
     assert "native_wakeword_launcher" not in exec_start
     assert "--handler-command" not in exec_start

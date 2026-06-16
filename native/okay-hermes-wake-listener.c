@@ -25,7 +25,10 @@
 #define RING_SECONDS 4U
 #define DEFAULT_THRESHOLD 0.6973556280136108f
 #define DEFAULT_CONSECUTIVE 2U
-#define WORKER_POLL_NS 100000000L
+#define CAPTURE_HEALTH_TIMEOUT_SECONDS 10.0
+#define WORKER_MAX_SLEEP_SECONDS 0.5
+#define WORKER_MIN_SLEEP_SECONDS 0.001
+#define CAPTURE_STATUS_FILENAME "native-listener.capture-status"
 
 struct sample_ring {
     /*
@@ -47,6 +50,7 @@ struct listener_options {
     const char *model_path;
     const char *handler_command;
     const char *activation_config_path;
+    const char *hermes_home;
     const char *target_object;
     float threshold;
     unsigned int consecutive;
@@ -54,6 +58,9 @@ struct listener_options {
     unsigned int inference_interval_ms;
     bool verbose;
     bool self_test;
+    char derived_hermes_home[4096];
+    char derived_model_path[4096];
+    char derived_activation_config_path[4096];
 };
 
 struct wake_model {
@@ -79,6 +86,7 @@ struct listener_data {
     _Atomic unsigned int negotiated_rate;
     _Atomic unsigned int negotiated_channels;
     unsigned int resample_accumulator;
+    char capture_status_path[4096];
     struct listener_options options;
 };
 
@@ -155,6 +163,102 @@ static void sleep_worker_tick(void)
 
     while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
     }
+}
+
+static int join_hermes_path(char *out, size_t out_size, const char *hermes_home, const char *relative_path)
+{
+    int written;
+
+    if (hermes_home == NULL || hermes_home[0] == '\0')
+        return -1;
+    written = snprintf(out, out_size, "%s/%s", hermes_home, relative_path);
+    if (written < 0 || (size_t)written >= out_size)
+        return -1;
+    return 0;
+}
+
+static int resolve_hermes_paths(struct listener_options *options)
+{
+    const char *env_hermes_home;
+    const char *home;
+    int written;
+
+    if (options->hermes_home == NULL || options->hermes_home[0] == '\0') {
+        env_hermes_home = getenv("HERMES_HOME");
+        if (env_hermes_home != NULL && env_hermes_home[0] != '\0') {
+            options->hermes_home = env_hermes_home;
+        } else {
+            home = getenv("HOME");
+            if (home == NULL || home[0] == '\0')
+                return -1;
+            written = snprintf(options->derived_hermes_home,
+                               sizeof(options->derived_hermes_home),
+                               "%s/.hermes",
+                               home);
+            if (written < 0 || (size_t)written >= sizeof(options->derived_hermes_home))
+                return -1;
+            options->hermes_home = options->derived_hermes_home;
+        }
+    }
+
+    if (options->model_path == NULL || options->model_path[0] == '\0') {
+        if (join_hermes_path(options->derived_model_path,
+                             sizeof(options->derived_model_path),
+                             options->hermes_home,
+                             "wakeword/okay-hermes-repcnn-onnx/wakeword.fixed-1x48000.onnx") < 0)
+            return -1;
+        options->model_path = options->derived_model_path;
+    }
+
+    if (options->activation_config_path == NULL || options->activation_config_path[0] == '\0') {
+        if (join_hermes_path(options->derived_activation_config_path,
+                             sizeof(options->derived_activation_config_path),
+                             options->hermes_home,
+                             "wakeword/config.yaml") < 0)
+            return -1;
+        options->activation_config_path = options->derived_activation_config_path;
+    }
+
+    return 0;
+}
+
+static void resolve_capture_status_path(struct listener_data *data)
+{
+    if (join_hermes_path(data->capture_status_path,
+                         sizeof(data->capture_status_path),
+                         data->options.hermes_home,
+                         "wakeword/" CAPTURE_STATUS_FILENAME) < 0)
+        data->capture_status_path[0] = '\0';
+}
+
+static void write_capture_status(const struct listener_data *data, const char *status)
+{
+    char tmp_path[4352];
+    FILE *file;
+    int written;
+
+    if (data->capture_status_path[0] == '\0')
+        return;
+    written = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", data->capture_status_path, (long)getpid());
+    if (written < 0 || (size_t)written >= sizeof(tmp_path))
+        return;
+
+    file = fopen(tmp_path, "w");
+    if (file == NULL)
+        return;
+    fprintf(file, "%s\n", status);
+    if (fclose(file) != 0) {
+        unlink(tmp_path);
+        return;
+    }
+    if (rename(tmp_path, data->capture_status_path) != 0)
+        unlink(tmp_path);
+}
+
+static void clear_capture_status(const struct listener_data *data)
+{
+    if (data->capture_status_path[0] != '\0')
+        unlink(data->capture_status_path);
 }
 
 static int ort_status_ok(struct wake_model *model, OrtStatus *status, const char *context)
@@ -270,6 +374,7 @@ static int run_model(struct wake_model *model, float *input, float *score)
 }
 
 static int run_handler_command(const char *command,
+                               const char *hermes_home,
                                const char *activation_config_path,
                                float probability,
                                unsigned int sample_rate,
@@ -284,13 +389,10 @@ static int run_handler_command(const char *command,
     struct timespec now;
 
     if ((command == NULL || command[0] == '\0') && activation_config_path != NULL && activation_config_path[0] != '\0') {
-        const char *home = getenv("HOME");
-        if (home == NULL || home[0] == '\0')
-            home = "/home/neos";
         snprintf(default_command,
                  sizeof(default_command),
-                 "%s/.hermes/hermes-agent/venv/bin/python -m okay_hermes_voice.native_activation_handler --config %s",
-                 home,
+                 "%s/hermes-agent/venv/bin/python -m okay_hermes_voice.native_activation_handler --config %s",
+                 hermes_home,
                  activation_config_path);
         command = default_command;
     }
@@ -387,6 +489,7 @@ static void *run_wakeword_worker(void *userdata)
                     hits = 0;
                 if (hits >= data->options.consecutive) {
                     run_handler_command(data->options.handler_command,
+                                        data->options.hermes_home,
                                         data->options.activation_config_path,
                                         probability,
                                         MODEL_RATE,
@@ -539,10 +642,11 @@ static void usage(FILE *out)
 {
     fprintf(out,
             "Okay Hermes native PipeWire wake listener\n\n"
-            "Usage: okay-hermes-wake-listener --model PATH [options]\n\n"
+            "Usage: okay-hermes-wake-listener [--hermes-home PATH] [options]\n\n"
             "Options:\n"
-            "  --model PATH          ONNX wakeword model path.\n"
-            "  --activation-config PATH  Config path passed to post-wake Python handler.\n"
+            "  --hermes-home PATH    Hermes root; defaults to HERMES_HOME or ~/.hermes.\n"
+            "  --model PATH          Override ONNX wakeword model path.\n"
+            "  --activation-config PATH  Override config path passed to post-wake Python handler.\n"
             "  --handler-command CMD Command to run on activation; JSON is sent on stdin.\n"
             "  --threshold FLOAT     Wake probability threshold, default %.6f.\n"
             "  --consecutive N       Positive windows required, default %u.\n"
@@ -592,6 +696,7 @@ static int parse_options(int argc, char *argv[], struct listener_options *option
     options->model_path = NULL;
     options->handler_command = NULL;
     options->activation_config_path = NULL;
+    options->hermes_home = NULL;
     options->verbose = false;
     options->self_test = false;
 
@@ -636,6 +741,10 @@ static int parse_options(int argc, char *argv[], struct listener_options *option
             options->target_object = argv[++i];
             continue;
         }
+        if (strcmp(argv[i], "--hermes-home") == 0 && i + 1 < argc) {
+            options->hermes_home = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             options->model_path = argv[++i];
             continue;
@@ -653,8 +762,8 @@ static int parse_options(int argc, char *argv[], struct listener_options *option
         return -1;
     }
 
-    if (options->model_path == NULL || options->model_path[0] == '\0') {
-        fprintf(stderr, "--model is required\n");
+    if (resolve_hermes_paths(options) < 0) {
+        fprintf(stderr, "could not resolve Hermes paths\n");
         return -1;
     }
     return 0;
