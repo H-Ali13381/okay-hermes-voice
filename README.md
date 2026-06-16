@@ -60,6 +60,15 @@ Install and start the background service:
 ./scripts/install_user_service.sh
 ```
 
+Optional native C++/Qt6 system tray toggle:
+
+```bash
+./scripts/install_wakeword_tray.sh
+~/.local/bin/okay-hermes-wakeword-tray &
+```
+
+The tray app is a small native binary with a persistent ON/OFF icon, a yellow animated loading icon while starting/stopping, and a right-click menu with `Turn ON`, `Turn OFF`, and `Exit`. The installer also adds `~/.config/autostart/okay-hermes-wakeword-tray.desktop` so it starts with your desktop session.
+
 The installer will:
 
 - install this package into the Hermes Python environment;
@@ -159,10 +168,10 @@ Raise the wake threshold above the default `0.6973556280136108`:
 threshold: 0.75
 ```
 
-You can also require more repeated wake detections before it triggers:
+By default, Hermes requires two consecutive positive wake windows to reduce false wakes. For lower latency, opt into one positive wake window explicitly:
 
 ```yaml
-trigger_consecutive_windows: 3
+trigger_consecutive_windows: 1
 ```
 
 Restart after editing:
@@ -226,6 +235,28 @@ Activation archives are local, but they can contain private speech. Do not publi
 ```
 
 Also remember that voice requests can use the same Hermes tools as your normal CLI sessions. Treat this like giving your local assistant a microphone, not like installing a harmless sound widget.
+
+## Phase 0 latency summaries
+
+Activation archives now include Phase 0 timing metadata for completed turns. To summarize the local archive without starting the daemon:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary
+```
+
+To summarize a specific archive directory:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations
+```
+
+For scripts or benchmark comparisons, emit JSON:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations --summary-json
+```
+
+The summary reports archive count, turn count, status/cancel counts, response-source counts, and per-stage timing statistics such as recording, STT, routing, answer generation, TTS, playback, and total turn time. If archive metadata is tagged with `benchmark_preset` and `benchmark_category`, the same metrics are grouped by preset so repeated task runs can be compared before and after later changes.
 
 ## Troubleshooting
 
@@ -296,9 +327,60 @@ This section is for users who want to know how it works or tune the system more 
 6. The interaction router classifies the transcript and schedules any short acknowledgement clip (for example “Okay, I’m on it.”) asynchronously, so the full Hermes agent can start immediately instead of waiting for the clip to finish.
 7. The request goes to a warm in-process Hermes Agent for lower latency than launching a new CLI process each time.
 8. Hermes generates a response with the user's normal model/provider/toolsets.
-9. Hermes TTS creates spoken audio.
-10. The daemon plays the answer through PulseAudio/PipeWire.
-11. If conversation mode is enabled, the daemon keeps listening for follow-up turns until a close phrase is heard.
+9. If the request is complex and the router elects to split work, Hermes should use built-in async background delegation (`delegate_task(background=true)`) so the voice thread can keep talking while a text-only subagent works.
+10. Hermes TTS creates spoken audio.
+11. The daemon plays the answer through PulseAudio/PipeWire.
+12. If conversation mode is enabled, the daemon keeps listening for follow-up turns until a close phrase is heard.
+
+### Native PipeWire listener
+
+The user service now starts the native C listener directly for the always-on path. Python is not in `ExecStart` and is not resident while the machine is just waiting for the wakeword.
+
+Native source:
+
+```text
+native/okay-hermes-wake-listener.c
+```
+
+Installed binary:
+
+```text
+~/.hermes/wakeword/bin/okay-hermes-wake-listener
+```
+
+The listener uses direct PipeWire `pw_stream` capture plus the ONNX Runtime C API. The realtime `.process` callback dequeues the PipeWire buffer, does only cheap F32 downmix/resampling into a 16 kHz mono ring buffer, queues the buffer back, and returns. A normal worker thread snapshots the model's 3-second 16 kHz mono input, runs `OrtRun`, applies threshold/consecutive-window gating, and launches the short-lived Python activation handler only after detection.
+
+Build it locally with:
+
+```bash
+PYTHON=~/.hermes/hermes-agent/venv/bin/python \
+  ./native/build_wake_listener.sh --output ~/.hermes/wakeword/bin/okay-hermes-wake-listener
+```
+
+Run a model-only self-test without opening a microphone stream:
+
+```bash
+~/.hermes/wakeword/bin/okay-hermes-wake-listener \
+  --model ~/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx \
+  --self-test
+```
+
+Run a short direct PipeWire capture test without launching Python on activation:
+
+```bash
+~/.hermes/wakeword/bin/okay-hermes-wake-listener \
+  --model ~/.hermes/wakeword/okay-hermes-repcnn-onnx/wakeword.onnx \
+  --duration-seconds 5 \
+  --verbose
+```
+
+On activation, the service uses:
+
+```text
+okay_hermes_voice.native_activation_handler
+```
+
+That Python process is intentionally short-lived: it records the command, transcribes, invokes Hermes, speaks the answer, then exits so STT/Hermes/CUDA/plugin memory is released instead of staying in the wake listener.
 
 ### Wakeword model
 
@@ -334,6 +416,16 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `threshold`: wakeword trigger probability.
 - `trigger_consecutive_windows`: number of positive windows required before activation.
 - `inference_interval_seconds`: CPU/latency tradeoff for ONNX inference.
+- `wake_audio_backend`: legacy Python daemon capture backend; ignored by the native systemd service path.
+- `wake_audio_device`: ALSA/PipeWire device name for the legacy `arecord` backend, default `default`.
+- `native_listener_bin`: installed C wake listener path used by the systemd launcher.
+- `native_pipewire_target`: optional PipeWire target object/node name or id for the native listener.
+- `native_listener_verbose`: print native listener scores to stderr for debugging.
+- `native_activation_server_enabled`: proxy native detections to the warm Python sidecar instead of starting a cold one-shot handler.
+- `native_activation_socket`: Unix socket path for the warm native activation sidecar.
+- `native_activation_server_timeout_seconds`: connect/read timeout for the native listener's short proxy process.
+- `cooldown_seconds`: normal delay before listening again after a completed activation.
+- `cancel_cooldown_seconds`: delay before listening again after popup Ctrl-C cancellation; `0.0` re-arms immediately.
 - `speech_rms_threshold`: rough speech volume threshold while recording a request.
 - `speech_start_timeout_seconds`: how long to wait for speech after the wake beep.
 - `speech_silence_duration_seconds`: how long silence must last before the request is considered done.
@@ -351,12 +443,75 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `interaction_router_min_confidence`: below this, route conservatively to the full Hermes agent.
 - `interaction_router_small_model_enabled`: allow simple/safe requests to bypass the full agent.
 - `interaction_router_ack_cache_enabled`: cache short acknowledgement clips like “Okay, I’m on it.” Cached files preserve the TTS provider's audio extension, and acknowledgements are played asynchronously before full-agent work.
+- `beep_enabled`: play short local beeps for wake/listening/error feedback.
+- `stt_provider`: `hermes` keeps the normal Hermes STT stack; `nemotron_en_streaming` enables NVIDIA Nemotron English-only cache-aware streaming ASR; `parakeet_unified_streaming` enables NVIDIA Parakeet Unified English streaming ASR.
+- `nemotron_model_name`: Hugging Face model id for the Nemotron provider, default `nvidia/nemotron-speech-streaming-en-0.6b`.
+- `nemotron_model_path`: optional local `.nemo` checkpoint path; blank loads by model name through NeMo.
+- `nemotron_device`: `auto`, `cuda`, or `cpu`.
+- `nemotron_att_context_size`: Nemotron streaming lookahead context, default `[70, 13]` for the English model.
+- `nemotron_cudnn_enabled`: enable/disable cuDNN for Nemotron CUDA inference; default `false` avoids the Torch CUDA 13 cuDNN sublibrary mismatch seen on this host.
+- `nemotron_live_streaming`: when Nemotron is selected, feed microphone blocks to ASR during command recording and use that final live transcript instead of running post-WAV STT.
+- `parakeet_model_name`: Hugging Face model id for the Parakeet provider, default `nvidia/parakeet-unified-en-0.6b`.
+- `parakeet_left_context_secs`, `parakeet_chunk_secs`, `parakeet_right_context_secs`: chunked streaming context. `chunk + right` is the theoretical ASR latency.
+- `parakeet_live_streaming`: when Parakeet is selected, feed microphone blocks to ASR during command recording and use that final live transcript instead of running post-WAV STT.
+- `transcript_only_mode`: for shadow/benchmark daemons, stop after STT and archive the transcript without routing to Hermes, TTS, or playback.
+- `prewarm_stt_on_start`: load the active STT path during daemon startup.
 - `playback_sink`: `@DEFAULT_SINK@`, `all`, or a specific Pulse/PipeWire sink name.
 - `visualization_enabled`: open the optional popup window.
+- `visualization_launch_grace_seconds`: how long to wait for a terminal launch to fail before trying the next candidate.
 - `conversation_mode_enabled`: keep listening after the first answer.
 - `conversation_close_phrases`: phrases that end the voice session.
 - `save_activation_audio`: save wake clips and metadata for later review.
 - `activation_archive_dir`: where activation records are stored.
+
+### Nemotron English streaming STT
+
+The default STT provider remains Hermes' configured STT stack. To test NVIDIA's
+English-only streaming ASR, install NeMo in the same environment that runs the
+daemon, then switch only the wakeword config:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python -m pip install Cython packaging
+~/.hermes/hermes-agent/venv/bin/python -m pip install 'git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]'
+```
+
+```yaml
+stt_provider: nemotron_en_streaming
+nemotron_model_name: nvidia/nemotron-speech-streaming-en-0.6b
+nemotron_device: auto
+nemotron_att_context_size: [70, 13]
+nemotron_cudnn_enabled: false
+nemotron_live_streaming: true
+```
+
+With `nemotron_live_streaming: true`, command capture starts a live Nemotron
+session before opening the microphone stream, feeds accepted mic blocks into
+NeMo as speech is recorded, and uses that final live transcript directly. The
+post-WAV `transcribe_command()` path remains as a fallback when live streaming is
+disabled or produces no transcript. The provider still uses NeMo's
+`CacheAwareStreamingAudioBuffer` and `conformer_stream_step`; it does not call
+offline `model.transcribe`.
+
+### Parakeet Unified English streaming STT
+
+Parakeet Unified is the higher-quality English NVIDIA streaming candidate. It
+uses a chunked RNNT streaming loop with configurable left/chunk/right context:
+
+```yaml
+stt_provider: parakeet_unified_streaming
+parakeet_model_name: nvidia/parakeet-unified-en-0.6b
+parakeet_device: auto
+parakeet_left_context_secs: 2.0
+parakeet_chunk_secs: 0.56
+parakeet_right_context_secs: 0.56
+parakeet_cudnn_enabled: false
+parakeet_live_streaming: true
+```
+
+With the default context, theoretical ASR latency is about 1.12s
+(`chunk + right`). Command capture starts a live Parakeet session before opening
+the microphone stream, feeds accepted mic blocks during recording, and uses the
+final live transcript directly when available.
 
 ### Manual install
 
@@ -388,7 +543,8 @@ PYTHON=/path/to/python ./scripts/install_user_service.sh
 ```bash
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --smoke-test
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --list-devices
-~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
+~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations --summary-json
+~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/activation_archive.py src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
 PYTHONPATH=src ~/.hermes/hermes-agent/venv/bin/python -m pytest -q
 ```
 

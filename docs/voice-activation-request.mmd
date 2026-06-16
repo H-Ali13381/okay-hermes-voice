@@ -1,0 +1,65 @@
+%%{init: {"theme":"base", "flowchart":{"curve":"basis","nodeSpacing":60,"rankSpacing":80,"padding":20,"htmlLabels":true}, "themeVariables":{"background":"#ffffff","primaryTextColor":"#111827","lineColor":"#374151","fontFamily":"Arial, sans-serif","fontSize":"20px"}}}%%
+flowchart TD
+    Wake([Wakeword detected])
+
+    subgraph Input["Input pipeline"]
+        Listen[Listen to mic<br/>rolling wake window]
+        Record[Record command<br/>until silence]
+        STT[Transcribe speech<br/>to text]
+    end
+
+    subgraph Session["Activation session"]
+        Setup[Start session<br/>beep, archive, popup]
+        Route{Route transcript}
+    end
+
+    subgraph Handling["Request handling"]
+        Local[Local/session action<br/>close, cancel, status]
+        Small[Small model<br/>quick answer]
+        Hermes[Hermes Agent<br/>full tool-capable request]
+    end
+
+    subgraph Output["Outputs + review trail"]
+        Speak[Speak response<br/>TTS/playback]
+        Archive[Archive audio,<br/>transcript, timings]
+        Popup[Update popup<br/>status + transcript]
+    end
+
+    Wake --> Listen
+    Listen --> Record
+    Record --> STT
+    STT --> Setup
+    Setup --> Route
+
+    Route -->|local / close / safety| Local
+    Route -->|small-model route| Small
+    Route -->|heavy-agent route| Hermes
+
+    Local --> Speak
+    Small --> Speak
+    Hermes --> Speak
+
+    Setup --> Archive
+    STT --> Archive
+    Speak --> Archive
+    Setup --> Popup
+    STT --> Popup
+    Speak --> Popup
+
+    Speak --> Done([Return to listening])
+    Archive --> Done
+    Popup --> Done
+
+    classDef input fill:#dbeafe,stroke:#2563eb,color:#111827
+    classDef session fill:#dcfce7,stroke:#16a34a,color:#111827
+    classDef route fill:#fef3c7,stroke:#d97706,color:#111827
+    classDef handling fill:#f3e8ff,stroke:#9333ea,color:#111827
+    classDef output fill:#ffe4e6,stroke:#e11d48,color:#111827
+    classDef terminal fill:#ecfdf5,stroke:#059669,color:#111827
+
+    class Listen,Record,STT input
+    class Setup session
+    class Route route
+    class Local,Small,Hermes handling
+    class Speak,Archive,Popup output
+    class Wake,Done terminal

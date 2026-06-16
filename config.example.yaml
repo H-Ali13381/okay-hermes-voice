@@ -6,13 +6,31 @@ threshold: 0.6973556280136108
 trigger_consecutive_windows: 2
 inference_interval_seconds: 0.5
 cooldown_seconds: 2.5
+cancel_cooldown_seconds: 0.0  # re-arm immediately after Ctrl-C popup cancellation
 sample_rate: 16000
 window_seconds: 3.0
 block_seconds: 0.1
+# Python wakeword capture backend. `sounddevice` preserves the existing PortAudio
+# path; `arecord` moves capture into an ALSA/PipeWire subprocess as an interim
+# low-RSS option while the native PipeWire listener matures.
+wake_audio_backend: sounddevice  # sounddevice, arecord
+wake_audio_device: default
+# Native always-on listener. The systemd service execs this C binary so Python is
+# not resident during idle wakeword listening. The Python activation handler is
+# launched only after the native listener detects the wakeword.
+native_listener_bin: ~/.hermes/wakeword/bin/okay-hermes-wake-listener
+native_pipewire_target: ''
+native_listener_verbose: false
+# Optional low-latency sidecar for the native listener: keep STT and Hermes
+# initialized in one Python process while the always-on wake detector stays C.
+native_activation_server_enabled: false
+native_activation_socket: ~/.hermes/wakeword/native-handler.sock
+native_activation_server_timeout_seconds: 5.0
 speech_rms_threshold: 200
 speech_start_consecutive_blocks: 2
 speech_start_timeout_seconds: 15.0
 speech_silence_duration_seconds: 1.1
+streamed_text_idle_duration_seconds: 1.0
 max_command_seconds: 120.0
 min_command_seconds: 0.45
 
@@ -45,6 +63,9 @@ hermes_prompt_prefix: >-
 # simple requests to a small model when enabled, and falls back conservatively to
 # the warm Hermes agent for tools, memory, external data, or uncertainty.
 interaction_router_enabled: true
+# Resolve/cache the router provider client during warm-handler startup. This
+# removes first-turn provider setup without sending a dummy classification call.
+prewarm_router_on_start: true
 interaction_router_provider: openrouter
 interaction_router_model: google/gemini-2.5-flash-lite
 interaction_router_timeout_seconds: 1.5
@@ -60,6 +81,45 @@ max_spoken_response_chars: 2500
 playback_sink: '@DEFAULT_SINK@'   # use 'all' to fan out to every Pulse/PipeWire sink
 playback_volume: 1.0
 beep_enabled: true
+# For shadow/benchmark daemons: capture/transcribe/archive only; skip routing,
+# Hermes answer generation, TTS, and playback.
+transcript_only_mode: false
+
+# Speech-to-text provider. Default `hermes` uses Hermes' configured STT stack
+# (normally local faster-whisper). Set to `nemotron_en_streaming` for NVIDIA's
+# cache-aware streaming ASR or `parakeet_unified_streaming` for NVIDIA Parakeet
+# Unified English streaming ASR.
+stt_provider: hermes
+nemotron_model_name: nvidia/nemotron-speech-streaming-en-0.6b
+# Optional local .nemo path; blank downloads/loads by Hugging Face model name via NeMo.
+nemotron_model_path: ''
+nemotron_device: auto          # auto, cuda, or cpu
+nemotron_att_context_size: [70, 13]
+nemotron_amp: true
+nemotron_amp_dtype: float16
+# Disabled by default: this host hit a cuDNN sublibrary version mismatch with
+# Torch CUDA 13. Keeping CUDA enabled but cuDNN off preserves the streaming path.
+nemotron_cudnn_enabled: false
+# When true, the wakeword recorder feeds mic blocks into Nemotron during capture
+# and uses the live final transcript instead of transcribing the WAV afterward.
+nemotron_live_streaming: true
+nemotron_online_normalization: false
+nemotron_pad_and_drop_preencoded: false
+
+parakeet_model_name: nvidia/parakeet-unified-en-0.6b
+# Optional local .nemo path; blank downloads/loads by Hugging Face model name via NeMo.
+parakeet_model_path: ''
+parakeet_device: auto          # auto, cuda, or cpu
+# Chunked streaming context. chunk + right is the theoretical ASR latency.
+parakeet_left_context_secs: 2.0
+parakeet_chunk_secs: 0.56
+parakeet_right_context_secs: 0.56
+parakeet_amp: true
+parakeet_amp_dtype: float16
+parakeet_cudnn_enabled: false
+# When true, feed mic blocks into Parakeet during command capture.
+parakeet_live_streaming: true
+
 prewarm_stt_on_start: true
 log_path: ~/.hermes/logs/okay-hermes-wakeword.log
 
@@ -67,6 +127,7 @@ visualization_enabled: true
 visualization_terminal: auto
 visualization_title: Hermes Voice
 visualization_keep_open_seconds: 45.0
+visualization_launch_grace_seconds: 0.35
 # Omit visualization_script to use the installed package copy.
 
 conversation_mode_enabled: true

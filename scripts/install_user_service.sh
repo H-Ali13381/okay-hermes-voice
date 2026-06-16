@@ -30,6 +30,8 @@ else
   echo "Keeping existing $hermes_home/wakeword/config.yaml"
 fi
 
+PYTHON="$python_bin" "$repo_dir/native/build_wake_listener.sh" --output "$hermes_home/wakeword/bin/okay-hermes-wake-listener"
+
 cp "$repo_dir/systemd/hermes-wakeword.service" "$HOME/.config/systemd/user/hermes-wakeword.service"
 systemctl --user daemon-reload
 systemctl --user enable --now hermes-wakeword.service
