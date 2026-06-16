@@ -9,6 +9,7 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QIcon>
@@ -37,6 +38,7 @@ namespace {
 constexpr const char* kWakewordUnit = "hermes-wakeword.service";
 constexpr const char* kHandlerUnit = "hermes-voice-handler.service";
 constexpr const char* kReadyMarkerRelativePath = ".hermes/wakeword/native-handler.ready";
+constexpr const char* kCaptureStatusRelativePath = ".hermes/wakeword/native-listener.capture-status";
 constexpr const char* kSystemdService = "org.freedesktop.systemd1";
 constexpr const char* kSystemdManagerPath = "/org/freedesktop/systemd1";
 constexpr const char* kSystemdManagerInterface = "org.freedesktop.systemd1.Manager";
@@ -83,8 +85,17 @@ QString readyDirPath() {
     return QFileInfo(readyPath()).absolutePath();
 }
 
+QString captureStatusPath() {
+    return QDir::home().filePath(kCaptureStatusRelativePath);
+}
+
+QString captureStatusDirPath() {
+    return QFileInfo(captureStatusPath()).absolutePath();
+}
+
 }  // namespace
 
+using okay_hermes_tray::CaptureHealth;
 using okay_hermes_tray::DaemonState;
 
 class TrayController : public QObject {
@@ -98,7 +109,8 @@ public:
           menu(new QMenu()),
           switchingTimer(new QTimer(this)),
           systemdRetryTimer(new QTimer(this)),
-          readyWatcher(new QFileSystemWatcher(this)) {
+          readyWatcher(new QFileSystemWatcher(this)),
+          captureStatusWatcher(new QFileSystemWatcher(this)) {
         turnOnAction = menu->addAction("Turn ON");
         turnOffAction = menu->addAction("Turn OFF");
         menu->addSeparator();
@@ -117,10 +129,13 @@ public:
         QObject::connect(systemdRetryTimer, &QTimer::timeout, this, &TrayController::setupSystemdWatchers);
         QObject::connect(readyWatcher, &QFileSystemWatcher::directoryChanged, this, &TrayController::readyMarkerChanged);
         QObject::connect(readyWatcher, &QFileSystemWatcher::fileChanged, this, &TrayController::readyMarkerChanged);
+        QObject::connect(captureStatusWatcher, &QFileSystemWatcher::directoryChanged, this, &TrayController::captureStatusChanged);
+        QObject::connect(captureStatusWatcher, &QFileSystemWatcher::fileChanged, this, &TrayController::captureStatusChanged);
 
         setupSystemdWatchers();
         requestUnitStates();
         setupReadyWatcher();
+        setupCaptureStatusWatcher();
         setupAudioWatcher();
         setSwitchingState("Loading wakeword daemon state…");
         QTimer::singleShot(150, this, &TrayController::refreshState);
@@ -145,7 +160,7 @@ private Q_SLOTS:
             switchingTimer->stop();
             turnOnAction->setEnabled(false);
             turnOffAction->setEnabled(anyControlledUnitActive());
-            tray->setToolTip("Okay Hermes wakeword: no microphone available");
+            tray->setToolTip("Okay Hermes wakeword: no microphone available / no capture frames");
             tray->setIcon(stateIcon(QColor(107, 114, 128)));
             return;
         }
@@ -191,6 +206,11 @@ private Q_SLOTS:
 
     void readyMarkerChanged() {
         setupReadyWatcher();
+        refreshState();
+    }
+
+    void captureStatusChanged() {
+        setupCaptureStatusWatcher();
         refreshState();
     }
 
@@ -290,12 +310,21 @@ private:
         return mediaClass == QStringLiteral("Audio/Source") && deviceClass != QStringLiteral("monitor") && !source->isVirtualDevice();
     }
 
+    CaptureHealth captureHealth() const {
+        QFile file(captureStatusPath());
+        if (!file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return CaptureHealth::Unknown;
+        }
+        const QString status = QString::fromUtf8(file.read(64));
+        return okay_hermes_tray::captureHealthFromStatusText(status);
+    }
+
     bool anyControlledUnitActive() const {
         return wakewordActive || handlerActive;
     }
 
     DaemonState daemonState() const {
-        return okay_hermes_tray::stateFromInputs(microphoneAvailable(), wakewordActive, handlerActive, handlerIsReady());
+        return okay_hermes_tray::stateFromInputs(microphoneAvailable(), captureHealth(), wakewordActive, handlerActive, handlerIsReady());
     }
 
     void runSystemdCommandsAsync(const QString& method, const QStringList& units) {
@@ -404,6 +433,18 @@ private:
         }
     }
 
+    void setupCaptureStatusWatcher() {
+        const QString dir = captureStatusDirPath();
+        QDir().mkpath(dir);
+        if (!captureStatusWatcher->directories().contains(dir)) {
+            captureStatusWatcher->addPath(dir);
+        }
+        const QString marker = captureStatusPath();
+        if (QFileInfo(marker).exists() && !captureStatusWatcher->files().contains(marker)) {
+            captureStatusWatcher->addPath(marker);
+        }
+    }
+
     void setupAudioWatcher() {
         auto* context = PulseAudioQt::Context::instance();
         QObject::connect(context, &PulseAudioQt::Context::stateChanged, this, [this] {
@@ -449,6 +490,7 @@ private:
     QTimer* switchingTimer = nullptr;
     QTimer* systemdRetryTimer = nullptr;
     QFileSystemWatcher* readyWatcher = nullptr;
+    QFileSystemWatcher* captureStatusWatcher = nullptr;
     QStringList unitSignalPaths;
     bool jobRemovedSignalConnected = false;
     bool unitNewSignalConnected = false;

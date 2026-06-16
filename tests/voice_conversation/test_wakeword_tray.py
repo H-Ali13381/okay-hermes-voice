@@ -66,10 +66,12 @@ def test_tray_stays_yellow_while_wakeword_is_active_but_handler_is_not_ready():
     assert "wakeword active but handler is still warming" in source
 
 
-def test_tray_turns_gray_when_no_microphone_is_available():
+def test_tray_turns_gray_when_no_microphone_or_capture_frames_are_available():
     source = tray_code()
 
     assert "DaemonState::NoMicrophone" in source
+    assert "CaptureHealth::Unhealthy" in source
+    assert "captureStatusChanged" in source
     assert "defaultSourceChanged" in source
     assert "sourceAdded" in source
     assert "no microphone available" in source
@@ -157,11 +159,19 @@ def test_tray_pure_state_helpers_compile_and_match_contract(tmp_path):
             #include "@STATE_HEADER_PATH@"
 
             int main() {
+                using okay_hermes_tray::CaptureHealth;
                 using okay_hermes_tray::DaemonState;
                 assert(okay_hermes_tray::systemdUnitObjectPath(QStringLiteral("hermes-wakeword.service")) == QStringLiteral("/org/freedesktop/systemd1/unit/hermes_2dwakeword_2eservice"));
                 assert(okay_hermes_tray::systemdUnitObjectPath(QStringLiteral("hermes-voice-handler.service")) == QStringLiteral("/org/freedesktop/systemd1/unit/hermes_2dvoice_2dhandler_2eservice"));
+                assert(okay_hermes_tray::captureHealthFromStatusText(QStringLiteral("healthy")) == CaptureHealth::Healthy);
+                assert(okay_hermes_tray::captureHealthFromStatusText(QStringLiteral(" healthy\\n")) == CaptureHealth::Healthy);
+                assert(okay_hermes_tray::captureHealthFromStatusText(QStringLiteral("unhealthy")) == CaptureHealth::Unhealthy);
+                assert(okay_hermes_tray::captureHealthFromStatusText(QStringLiteral("starting")) == CaptureHealth::Unknown);
+                assert(okay_hermes_tray::captureHealthFromStatusText(QStringLiteral("")) == CaptureHealth::Unknown);
+                assert(okay_hermes_tray::captureHealthFromStatusText(QStringLiteral("garbage")) == CaptureHealth::Unknown);
                 struct StateCase {
                     bool microphoneAvailable;
+                    CaptureHealth captureHealth;
                     bool wakewordActive;
                     bool handlerActive;
                     bool handlerReady;
@@ -169,27 +179,27 @@ def test_tray_pure_state_helpers_compile_and_match_contract(tmp_path):
                 };
 
                 const StateCase cases[] = {
-                    {false, false, false, false, DaemonState::NoMicrophone},
-                    {false, false, false, true, DaemonState::NoMicrophone},
-                    {false, false, true, false, DaemonState::NoMicrophone},
-                    {false, false, true, true, DaemonState::NoMicrophone},
-                    {false, true, false, false, DaemonState::NoMicrophone},
-                    {false, true, false, true, DaemonState::NoMicrophone},
-                    {false, true, true, false, DaemonState::NoMicrophone},
-                    {false, true, true, true, DaemonState::NoMicrophone},
-                    {true, false, false, false, DaemonState::Off},
-                    {true, false, false, true, DaemonState::Off},
-                    {true, false, true, false, DaemonState::Starting},
-                    {true, false, true, true, DaemonState::Starting},
-                    {true, true, false, false, DaemonState::Starting},
-                    {true, true, false, true, DaemonState::Starting},
-                    {true, true, true, false, DaemonState::Starting},
-                    {true, true, true, true, DaemonState::On},
+                    {false, CaptureHealth::Unknown, false, false, false, DaemonState::NoMicrophone},
+                    {false, CaptureHealth::Healthy, true, true, true, DaemonState::NoMicrophone},
+                    {false, CaptureHealth::Unhealthy, true, true, true, DaemonState::NoMicrophone},
+                    {true, CaptureHealth::Unknown, false, false, false, DaemonState::Off},
+                    {true, CaptureHealth::Unhealthy, false, false, false, DaemonState::Off},
+                    {true, CaptureHealth::Unhealthy, true, false, false, DaemonState::NoMicrophone},
+                    {true, CaptureHealth::Unhealthy, true, true, true, DaemonState::NoMicrophone},
+                    {true, CaptureHealth::Unknown, false, true, false, DaemonState::Starting},
+                    {true, CaptureHealth::Healthy, false, true, true, DaemonState::Starting},
+                    {true, CaptureHealth::Unknown, true, false, false, DaemonState::Starting},
+                    {true, CaptureHealth::Healthy, true, false, true, DaemonState::Starting},
+                    {true, CaptureHealth::Unknown, true, true, false, DaemonState::Starting},
+                    {true, CaptureHealth::Healthy, true, true, false, DaemonState::Starting},
+                    {true, CaptureHealth::Unknown, true, true, true, DaemonState::Starting},
+                    {true, CaptureHealth::Healthy, true, true, true, DaemonState::On},
                 };
 
                 for (const auto& item : cases) {
                     assert(okay_hermes_tray::stateFromInputs(
                         item.microphoneAvailable,
+                        item.captureHealth,
                         item.wakewordActive,
                         item.handlerActive,
                         item.handlerReady) == item.expected);

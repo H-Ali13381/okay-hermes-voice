@@ -452,9 +452,13 @@ static void *run_wakeword_worker(void *userdata)
      */
     float *model_input = calloc(MODEL_SAMPLES, sizeof(float));
     uint64_t last_total = 0;
+    uint64_t last_health_total = 0;
     unsigned int hits = 0;
     double last_inference = 0.0;
+    double last_samples_at = monotonic_seconds();
     double inference_interval = (double)data->options.inference_interval_ms / 1000.0;
+    bool capture_healthy = false;
+    bool capture_unhealthy = false;
 
     if (model_input == NULL) {
         fprintf(stderr, "failed to allocate wakeword worker buffer\n");
@@ -465,15 +469,25 @@ static void *run_wakeword_worker(void *userdata)
 
     while (atomic_load_explicit(&data->running, memory_order_acquire)) {
         uint64_t total = atomic_load_explicit(&data->ring.total_written, memory_order_acquire);
+        double now = monotonic_seconds();
         size_t copied;
         float probability = 0.0f;
 
-        if (total != last_total && total >= MODEL_SAMPLES) {
-            double now = monotonic_seconds();
-            if (now - last_inference < inference_interval) {
-                sleep_worker_tick();
-                continue;
+        if (total != last_health_total) {
+            last_health_total = total;
+            last_samples_at = now;
+            if (!capture_healthy) {
+                write_capture_status(data, "healthy");
+                capture_healthy = true;
+                capture_unhealthy = false;
             }
+        } else if (!capture_unhealthy && now - last_samples_at >= CAPTURE_HEALTH_TIMEOUT_SECONDS) {
+            write_capture_status(data, "unhealthy");
+            capture_unhealthy = true;
+            capture_healthy = false;
+        }
+
+        if (total != last_total && total >= MODEL_SAMPLES && now - last_inference >= inference_interval) {
             last_inference = now;
             copied = ring_snapshot_latest(&data->ring, model_input, MODEL_SAMPLES);
             if (copied != MODEL_SAMPLES) {
@@ -854,6 +868,9 @@ int main(int argc, char *argv[])
         return rc;
     }
 
+    resolve_capture_status_path(&data);
+    write_capture_status(&data, "starting");
+
     pw_init(&argc, &argv);
     atomic_store(&data.running, true);
     atomic_store(&data.worker_started, false);
@@ -935,6 +952,7 @@ out_ring:
 out_loop:
     pw_main_loop_destroy(data.loop);
 out_deinit:
+    clear_capture_status(&data);
     pw_deinit();
     wake_model_destroy(&data.model);
     return rc;
