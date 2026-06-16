@@ -154,13 +154,26 @@ static double monotonic_seconds(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
-static void sleep_worker_tick(void)
+static void sleep_worker_until_next_deadline(double now,
+                                             double inference_interval,
+                                             double last_samples_at,
+                                             bool capture_unhealthy)
 {
-    struct timespec ts = {
-        .tv_sec = 0,
-        .tv_nsec = WORKER_POLL_NS,
-    };
+    double sleep_seconds = inference_interval;
+    struct timespec ts;
 
+    if (!capture_unhealthy) {
+        double health_due_in = last_samples_at + CAPTURE_HEALTH_TIMEOUT_SECONDS - now;
+        if (health_due_in < sleep_seconds)
+            sleep_seconds = health_due_in;
+    }
+    if (sleep_seconds > WORKER_MAX_SLEEP_SECONDS)
+        sleep_seconds = WORKER_MAX_SLEEP_SECONDS;
+    if (sleep_seconds < WORKER_MIN_SLEEP_SECONDS)
+        sleep_seconds = WORKER_MIN_SLEEP_SECONDS;
+
+    ts.tv_sec = (time_t)sleep_seconds;
+    ts.tv_nsec = (long)((sleep_seconds - (double)ts.tv_sec) * 1000000000.0);
     while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
     }
 }
@@ -490,11 +503,7 @@ static void *run_wakeword_worker(void *userdata)
         if (total != last_total && total >= MODEL_SAMPLES && now - last_inference >= inference_interval) {
             last_inference = now;
             copied = ring_snapshot_latest(&data->ring, model_input, MODEL_SAMPLES);
-            if (copied != MODEL_SAMPLES) {
-                sleep_worker_tick();
-                continue;
-            }
-            if (run_model(&data->model, model_input, &probability) == 0) {
+            if (copied == MODEL_SAMPLES && run_model(&data->model, model_input, &probability) == 0) {
                 if (data->options.verbose)
                     fprintf(stderr, "wake-listener score=%.6f rate=%u channels=1\n", probability, MODEL_RATE);
                 if (probability >= data->options.threshold)
@@ -513,7 +522,7 @@ static void *run_wakeword_worker(void *userdata)
             }
             last_total = total;
         }
-        sleep_worker_tick();
+        sleep_worker_until_next_deadline(now, inference_interval, last_samples_at, capture_unhealthy);
     }
 
     free(model_input);

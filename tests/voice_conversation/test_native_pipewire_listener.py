@@ -76,6 +76,52 @@ def test_native_listener_disables_onnx_arena_features_for_tiny_fixed_shape_model
     assert "CreateCpuMemoryInfo(OrtDeviceAllocator" in init
 
 
+def test_native_listener_reports_capture_health_from_worker_not_rt_callback():
+    source = SOURCE.read_text(encoding="utf-8")
+    callback = _static_function_body(source, "on_process")
+    worker = _static_function_body(source, "run_wakeword_worker")
+
+    assert "write_capture_status" in source
+    assert '"starting"' in source
+    assert '"healthy"' in worker
+    assert '"unhealthy"' in worker
+    assert "CAPTURE_HEALTH_TIMEOUT_SECONDS 10.0" in source
+    assert "write_capture_status" not in callback
+    assert "fopen" not in callback
+    assert "rename(" not in callback
+
+
+def test_native_listener_uses_one_worker_timer_for_inference_and_capture_health():
+    source = SOURCE.read_text(encoding="utf-8")
+    worker = _static_function_body(source, "run_wakeword_worker")
+    sleeper = _static_function_body(source, "sleep_worker_until_next_deadline")
+
+    assert "WORKER_POLL_NS" not in source
+    assert "sleep_worker_tick" not in source
+    assert "sleep_worker_until_next_deadline" in worker
+    assert "inference_interval" in sleeper
+    assert "CAPTURE_HEALTH_TIMEOUT_SECONDS" in sleeper
+    assert "nanosleep" in sleeper
+
+
+def test_native_listener_derives_paths_from_hermes_home_root():
+    source = SOURCE.read_text(encoding="utf-8")
+    parser = _static_function_body(source, "parse_options")
+    resolver = _static_function_body(source, "resolve_hermes_paths")
+    status_resolver = _static_function_body(source, "resolve_capture_status_path")
+    handler = _static_function_body(source, "run_handler_command")
+
+    assert "--hermes-home" in source
+    assert "hermes_home" in parser
+    assert "wakeword/okay-hermes-repcnn-onnx/wakeword.fixed-1x48000.onnx" in resolver
+    assert "wakeword/config.yaml" in resolver
+    assert "CAPTURE_STATUS_FILENAME" in status_resolver
+    assert "hermes_home" in status_resolver
+    assert "activation_config_path" not in status_resolver
+    assert "hermes-agent/venv/bin/python" in handler
+    assert "HOME" not in handler
+
+
 def test_native_pipewire_listener_compiles_and_exposes_help(tmp_path):
     if shutil.which("cc") is None or shutil.which("pkg-config") is None:
         raise AssertionError("cc and pkg-config are required to build the native PipeWire listener")
