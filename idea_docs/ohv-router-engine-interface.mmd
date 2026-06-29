@@ -1,0 +1,39 @@
+flowchart TD
+    A[Final transcript from Parakeet STT] --> B[classify_request transcript cfg]
+
+    B --> C{Local deterministic guard?}
+    C -->|close / cancel phrase| D[RouterDecision<br/>IMMEDIATE_ONLY<br/>ack NONE<br/>confidence 1.0]
+    C -->|not local| E{Injected engine?}
+
+    E -->|yes| F[IntentClassificationEngine.classify<br/>future BERT / ONNX router]
+    E -->|no| G[DEFAULT_INTENT_ENGINE]
+
+    G --> H[LlmIntentClassificationEngine]
+    H --> I{Prewarmed provider client?}
+    I -->|yes| J[classify_with_client]
+    I -->|no| K[resolve provider client<br/>cache client + model]
+    K --> J
+
+    J --> L[LLM JSON decision<br/>complexity, route_target, ack,<br/>tool flags, risk, confidence, reason]
+    F --> L
+    D --> M[choose_voice_route]
+    L --> M
+
+    M --> N{Route target}
+    N -->|IMMEDIATE_ONLY / local| O[Local voice action<br/>no Hermes]
+    N -->|SMALL_MODEL / chat| P[Small model answer path]
+    N -->|HEAVY_AGENT / agent| Q[Hermes Agent path]
+    N -->|SAFETY / clarification| R[Canned safety or clarify response]
+
+    Q --> S[Later: logged examples distill into BERT router]
+    L --> S
+
+    classDef current fill:#e8f1ff,stroke:#4978c7,color:#111;
+    classDef future fill:#e8ffe8,stroke:#3a9b48,color:#111;
+    classDef local fill:#fff6d7,stroke:#b58900,color:#111;
+    classDef output fill:#f3e8ff,stroke:#805ad5,color:#111;
+
+    class B,E,G,H,I,J,K,L,M,N current;
+    class F,S future;
+    class C,D,O local;
+    class P,Q,R output;

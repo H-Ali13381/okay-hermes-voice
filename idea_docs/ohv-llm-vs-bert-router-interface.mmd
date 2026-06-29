@@ -1,0 +1,35 @@
+flowchart TD
+    A[Routing boundary<br/>IntentClassificationEngine.classify] --> B{Selected engine implementation}
+
+    B -->|current| C[LlmIntentClassificationEngine]
+    C --> D[Provider client + router prompt]
+    D --> E[Structured RouterDecision JSON]
+
+    E --> F[Decision telemetry log]
+    F --> G[Training examples<br/>for future local router]
+
+    B -->|future swap| H[BertIntentClassificationEngine<br/>or ONNX/local classifier]
+    G --> H
+    H --> I[Same RouterDecision schema]
+
+    E --> J[Shared downstream route selection]
+    I --> J
+
+    J --> K{Route target}
+    K --> L[Local / immediate action]
+    K --> M[Chat / small-model answer]
+    K --> N[Tools / structured action lane]
+    K --> O[Agent / Hermes handoff]
+    K --> P[Clarify / safety response]
+
+    classDef interface fill:#efe7ff,stroke:#6b46c1,color:#111;
+    classDef current fill:#e8f1ff,stroke:#2b6cb0,color:#111;
+    classDef future fill:#e8ffe8,stroke:#2f855a,color:#111;
+    classDef data fill:#fff6d7,stroke:#b7791f,color:#111;
+    classDef route fill:#f0fff4,stroke:#38a169,color:#111;
+
+    class A,B,J,K interface;
+    class C,D,E current;
+    class H,I future;
+    class F,G data;
+    class L,M,N,O,P route;
