@@ -12,6 +12,18 @@ def test_build_router_messages_mentions_json_and_forbids_solving():
     assert "inspect the repo and fix tests" in joined
 
 
+def test_build_router_messages_biases_simple_safe_chat_to_small_model():
+    messages = build_router_messages("how are you")
+    joined = "\n".join(message["content"] for message in messages)
+
+    assert "small_model" in joined
+    assert "heavy_agent" in joined
+    assert "pleasantries" in joined
+    assert "fun facts" in joined
+    assert "tool_risk" in joined
+    assert "Do not choose heavy_agent for simple safe chat" in joined
+
+
 class FakeMessage:
     def __init__(self, content: str):
         self.content = content

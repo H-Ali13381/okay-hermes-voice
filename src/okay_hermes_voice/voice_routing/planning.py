@@ -18,7 +18,8 @@ def plan_interaction_route(cfg: Dict[str, Any], transcript: str) -> Optional[Voi
     from . import plan_voice_request
     plan = plan_voice_request(transcript, router_cfg)
     LOG.info(
-        "Interaction router target=%s ack=%s reason=%s confidence=%.2f latency=%.3fs router_reason=%s",
+        "Interaction router lane=%s target=%s ack=%s reason=%s confidence=%.2f latency=%.3fs router_reason=%s",
+        plan.route_lane.value,
         plan.route.target.value,
         plan.route.ack_template_id.value,
         plan.route.reason,

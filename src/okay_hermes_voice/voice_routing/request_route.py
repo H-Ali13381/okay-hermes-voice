@@ -15,10 +15,21 @@ def route_transcribed_request(
 ) -> Optional[VoiceRequestPlan]:
     """Plan routing for a final STT transcript and play any immediate acknowledgement."""
     from . import plan_interaction_route, play_interaction_ack
+
+    provisional_ack_started = False
+    if loop_ack_until_cancelled:
+        provisional_ack_started = play_interaction_ack(
+            cfg,
+            AckTemplate.GOT_IT,
+            cancel_check=cancel_check,
+            block=False,
+            loop_until_cancelled=True,
+        )
+
     plan = plan_interaction_route(cfg, transcript)
     if plan is None:
         return None
-    if plan.route.ack_template_id is not AckTemplate.NONE:
+    if not provisional_ack_started and plan.route.ack_template_id is not AckTemplate.NONE:
         play_interaction_ack(
             cfg,
             plan.route.ack_template_id,

@@ -82,6 +82,7 @@ class RoutedTurnHandler:
         router_metadata: Dict[str, Any] = {}
         if interaction_plan:
             router_metadata = {
+                "interaction_route_lane": interaction_plan.route_lane.value,
                 "interaction_route_target": interaction_plan.route.target.value,
                 "interaction_route_reason": interaction_plan.route.reason,
                 "interaction_ack_template": interaction_plan.route.ack_template_id.value,

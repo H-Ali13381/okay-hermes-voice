@@ -15,9 +15,10 @@ def interaction_router_config_from_daemon_config(cfg: Dict[str, Any]) -> Interac
         "router_model": cfg.get("interaction_router_model", "google/gemini-2.5-flash-lite"),
         "router_timeout_seconds": cfg.get("interaction_router_timeout_seconds", 1.5),
         "router_min_confidence": cfg.get("interaction_router_min_confidence", 0.70),
-        "small_model_enabled": cfg.get("interaction_router_small_model_enabled", False),
+        "small_model_enabled": cfg.get("interaction_router_small_model_enabled", True),
         "small_model_provider": cfg.get("interaction_router_small_model_provider", "openrouter"),
         "small_model_model": cfg.get("interaction_router_small_model_model", "google/gemini-2.5-flash-lite"),
+        "small_model_timeout_seconds": cfg.get("interaction_router_small_model_timeout_seconds", 4.0),
         "ack_cache_enabled": cfg.get("interaction_router_ack_cache_enabled", True),
         "ack_cache_dir": cfg.get("interaction_router_ack_cache_dir", str(HERMES_HOME / "wakeword" / "ack_cache")),
     })

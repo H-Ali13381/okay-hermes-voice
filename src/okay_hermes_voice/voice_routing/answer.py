@@ -21,6 +21,8 @@ def answer_routed_request(
         return "I can’t help with that request.", history, "safety_flow"
     if plan and plan.route.target is RouteTarget.ASK_CLARIFICATION:
         return "Could you clarify what you want me to do?", history, "ask_clarification"
+    if plan and plan.route.target is RouteTarget.IMMEDIATE_ONLY:
+        return None, history, "immediate_only"
     if plan and plan.route.target is RouteTarget.SMALL_MODEL:
         from . import answer_with_small_model, interaction_router_config_from_daemon_config
         router_cfg = interaction_router_config_from_daemon_config(cfg)

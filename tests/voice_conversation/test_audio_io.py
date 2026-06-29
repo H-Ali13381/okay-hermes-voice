@@ -151,6 +151,7 @@ def test_record_command_ignores_isolated_spike_before_real_speech(monkeypatch):
             "speech_rms_threshold": 200,
             "speech_silence_duration_seconds": 0.3,
             "speech_start_timeout_seconds": 10.0,
+            "parakeet_live_streaming": False,
         }
     )
     monkeypatch.setattr(audio_recording, "_SD", types.SimpleNamespace(InputStream=FakeInputStream))

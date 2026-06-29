@@ -3,15 +3,16 @@ from __future__ import annotations
 from okay_hermes_voice.interaction_router import InteractionRouterConfig
 
 
-def test_router_config_defaults_are_conservative():
+def test_router_config_defaults_use_gemini_small_model():
     cfg = InteractionRouterConfig()
 
     assert cfg.router_enabled is True
     assert cfg.router_provider == "openrouter"
     assert cfg.router_model == "google/gemini-2.5-flash-lite"
     assert cfg.router_timeout_seconds == 1.5
+    assert cfg.small_model_timeout_seconds == 4.0
     assert cfg.router_min_confidence == 0.70
-    assert cfg.small_model_enabled is False
+    assert cfg.small_model_enabled is True
     assert cfg.ack_cache_enabled is True
 
 def test_router_config_from_mapping_strips_blank_values():
@@ -20,6 +21,7 @@ def test_router_config_from_mapping_strips_blank_values():
             "router_provider": " deepseek ",
             "router_model": " deepseek/deepseek-v4-flash ",
             "router_timeout_seconds": "2.25",
+            "small_model_timeout_seconds": "4.5",
             "router_min_confidence": "0.8",
             "small_model_enabled": "yes",
         }
@@ -28,5 +30,6 @@ def test_router_config_from_mapping_strips_blank_values():
     assert cfg.router_provider == "deepseek"
     assert cfg.router_model == "deepseek/deepseek-v4-flash"
     assert cfg.router_timeout_seconds == 2.25
+    assert cfg.small_model_timeout_seconds == 4.5
     assert cfg.router_min_confidence == 0.8
     assert cfg.small_model_enabled is True

@@ -1,14 +1,6 @@
 """Deterministic local voice-session close phrases."""
 from __future__ import annotations
 
-LOCAL_CLOSE_PHRASES = {
-    "close",
-    "close voice",
-    "close voice mode",
-    "stop listening",
-    "end voice mode",
-    "cancel",
-    "never mind",
-}
+from ..close_phrases import DEFAULT_CLOSE_PHRASES, LOCAL_CLOSE_PHRASES, normalize_close_phrase
 
-__all__ = ["LOCAL_CLOSE_PHRASES"]
+__all__ = ["DEFAULT_CLOSE_PHRASES", "LOCAL_CLOSE_PHRASES", "normalize_close_phrase"]

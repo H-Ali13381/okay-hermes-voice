@@ -4,7 +4,7 @@ from __future__ import annotations
 from ..interaction_ack_cache import AckTemplate
 from ..interaction_types import InteractionRouterConfig, RequestComplexity, RouteTarget, RouterDecision, ToolRisk, VoiceRoute
 from .ack_default import _ack_or_default
-from .close_phrases import LOCAL_CLOSE_PHRASES
+from .close_phrases import LOCAL_CLOSE_PHRASES, normalize_close_phrase
 
 
 def choose_voice_route(
@@ -12,7 +12,7 @@ def choose_voice_route(
     decision: RouterDecision,
     cfg: InteractionRouterConfig,
 ) -> VoiceRoute:
-    normalized = " ".join(transcript.strip().lower().split())
+    normalized = normalize_close_phrase(transcript)
     if normalized in LOCAL_CLOSE_PHRASES:
         return VoiceRoute(RouteTarget.IMMEDIATE_ONLY, AckTemplate.NONE, "local_close_phrase")
 

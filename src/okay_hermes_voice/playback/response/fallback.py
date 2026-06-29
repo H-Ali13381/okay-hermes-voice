@@ -5,13 +5,13 @@ import contextlib
 import threading
 from typing import Any, Callable, Dict, Optional
 
-from tools.voice_mode import play_audio_file, stop_playback
-
 from ...daemon_config import LOG
 from .cancellation import _playback_cancel_requested
 
 
 def _play_hermes_audio_file_with_cancel(file_path: str, cancel_check: Optional[Callable[[], bool]]) -> bool:
+    from tools.voice_mode import play_audio_file, stop_playback
+
     if cancel_check is None:
         return bool(play_audio_file(str(file_path)))
 

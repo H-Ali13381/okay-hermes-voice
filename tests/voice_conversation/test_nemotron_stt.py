@@ -267,9 +267,10 @@ def test_prewarm_uses_nemotron_without_dummy_wav(monkeypatch):
     assert calls == [cfg]
 
 
-def test_default_config_documents_nemotron_alternative():
-    assert daemon_config.DEFAULT_CONFIG["stt_provider"] == "hermes"
+def test_default_config_documents_parakeet_default_and_nemotron_alternative():
+    assert daemon_config.DEFAULT_CONFIG["stt_provider"] == "parakeet_unified_streaming"
     assert daemon_config.DEFAULT_CONFIG["transcript_only_mode"] is False
+    assert daemon_config.DEFAULT_CONFIG["parakeet_live_streaming"] is True
     assert daemon_config.DEFAULT_CONFIG["nemotron_model_name"] == "nvidia/nemotron-speech-streaming-en-0.6b"
     assert daemon_config.DEFAULT_CONFIG["nemotron_att_context_size"] == [70, 13]
     assert daemon_config.DEFAULT_CONFIG["nemotron_cudnn_enabled"] is False

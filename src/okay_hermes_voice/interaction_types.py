@@ -25,6 +25,15 @@ class RouteTarget(str, Enum):
     SAFETY_FLOW = "safety_flow"
 
 
+class RouteLane(str, Enum):
+    """Canonical product-facing route lanes for logs and future router training."""
+
+    LOCAL = "local"
+    CHAT = "chat"
+    TOOLS = "tools"
+    AGENT = "agent"
+
+
 class AckTemplate(str, Enum):
     NONE = "none"
     GOT_IT = "got_it"
@@ -52,9 +61,10 @@ class InteractionRouterConfig:
     router_timeout_seconds: float = 1.5
     router_min_confidence: float = 0.70
 
-    small_model_enabled: bool = False
+    small_model_enabled: bool = True
     small_model_provider: str = "openrouter"
     small_model_model: str = "google/gemini-2.5-flash-lite"
+    small_model_timeout_seconds: float = 4.0
 
     ack_cache_enabled: bool = True
     ack_cache_dir: str = "~/.cache/okay-hermes-voice/acks"
@@ -83,6 +93,7 @@ class InteractionRouterConfig:
         cfg = cls(**kwargs)
         cfg.router_min_confidence = max(0.0, min(float(cfg.router_min_confidence), 1.0))
         cfg.router_timeout_seconds = max(0.1, float(cfg.router_timeout_seconds))
+        cfg.small_model_timeout_seconds = max(0.1, float(cfg.small_model_timeout_seconds))
         return cfg
 
     @property
@@ -149,6 +160,30 @@ class VoiceRequestPlan:
     transcript: str
     decision: RouterDecision
     route: VoiceRoute
+
+    @property
+    def route_lane(self) -> RouteLane:
+        """Return the canonical product-facing route lane for logs/training."""
+        if self.route.target is RouteTarget.IMMEDIATE_ONLY:
+            return RouteLane.LOCAL
+        if self.route.target is RouteTarget.SMALL_MODEL:
+            return RouteLane.CHAT
+        if self.route.target is RouteTarget.ASK_CLARIFICATION:
+            return RouteLane.CHAT
+        if self.route.target is RouteTarget.SAFETY_FLOW:
+            return RouteLane.LOCAL
+        if _decision_needs_structured_tools(self.decision):
+            return RouteLane.TOOLS
+        return RouteLane.AGENT
+
+
+def _decision_needs_structured_tools(decision: RouterDecision) -> bool:
+    return (
+        decision.requires_tools
+        or decision.requires_memory
+        or decision.requires_external_data
+        or decision.tool_risk in {ToolRisk.READ_ONLY, ToolRisk.SIDE_EFFECT, ToolRisk.IRREVERSIBLE}
+    )
 
 
 def _enum_value(enum_type: type[Enum], value: Any, fallback: Enum) -> Any:

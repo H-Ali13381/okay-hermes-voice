@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from .interaction_ack_cache import ACK_AUDIO_SUFFIXES, ACK_TEXT, AcknowledgementCache
 from .interaction_clients import (
+    IntentClassificationEngine,
+    LlmIntentClassificationEngine,
     answer_with_small_model,
     build_router_messages,
     build_small_model_messages,
@@ -18,6 +20,7 @@ from .interaction_types import (
     AckTemplate,
     InteractionRouterConfig,
     RequestComplexity,
+    RouteLane,
     RouteTarget,
     RouterDecision,
     ToolRisk,
@@ -34,8 +37,11 @@ __all__ = [
     "AcknowledgementCache",
     "AckTemplate",
     "InteractionRouterConfig",
+    "IntentClassificationEngine",
     "LOCAL_CLOSE_PHRASES",
+    "LlmIntentClassificationEngine",
     "RequestComplexity",
+    "RouteLane",
     "RouteTarget",
     "RouterDecision",
     "ToolRisk",

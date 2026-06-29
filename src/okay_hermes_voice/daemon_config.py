@@ -11,6 +11,8 @@ from typing import Any, Dict, List
 
 import yaml
 
+from .close_phrases import DEFAULT_CLOSE_PHRASES
+
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
 HERMES_REPO = Path(os.environ.get("HERMES_REPO", str(HERMES_HOME / "hermes-agent"))).expanduser()
 if str(HERMES_REPO) not in sys.path:
@@ -72,9 +74,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "interaction_router_model": "google/gemini-2.5-flash-lite",
     "interaction_router_timeout_seconds": 1.5,
     "interaction_router_min_confidence": 0.70,
-    "interaction_router_small_model_enabled": False,
+    "interaction_router_small_model_enabled": True,
     "interaction_router_small_model_provider": "openrouter",
     "interaction_router_small_model_model": "google/gemini-2.5-flash-lite",
+    "interaction_router_small_model_timeout_seconds": 4.0,
     "interaction_router_ack_cache_enabled": True,
     "interaction_router_ack_cache_dir": str(HERMES_HOME / "wakeword" / "ack_cache"),
     "tts_enabled": True,
@@ -83,10 +86,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "playback_volume": 1.0,
     "beep_enabled": True,
     "transcript_only_mode": False,
-    # STT provider for captured commands. "hermes" preserves the normal Hermes
-    # transcription stack; "nemotron_en_streaming" uses NVIDIA's cache-aware
-    # English-only Nemotron streaming ASR as an optional local provider.
-    "stt_provider": "hermes",
+    # STT provider for captured commands. Parakeet is the default transcript-first
+    # streaming path; "hermes" preserves the normal Hermes transcription stack,
+    # and "nemotron_en_streaming" uses NVIDIA's cache-aware English-only
+    # Nemotron streaming ASR as an optional local provider.
+    "stt_provider": "parakeet_unified_streaming",
     "nemotron_model_name": "nvidia/nemotron-speech-streaming-en-0.6b",
     "nemotron_model_path": "",
     "nemotron_device": "auto",
@@ -120,24 +124,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "conversation_max_turns": 50,
     "conversation_followup_beep_enabled": False,
     "conversation_close_ack": "Closing voice mode.",
-    "conversation_close_phrases": [
-        "close",
-        "please close",
-        "close voice",
-        "close voice mode",
-        "close conversation",
-        "close hermes",
-        "stop",
-        "stop voice",
-        "stop listening",
-        "end conversation",
-        "end voice mode",
-        "that's all",
-        "that is all",
-        "goodbye",
-        "bye",
-        "cancel",
-    ],
+    "conversation_close_phrases": list(DEFAULT_CLOSE_PHRASES),
     "save_activation_audio": True,
     "activation_archive_dir": str(HERMES_HOME / "wakeword" / "activations"),
     "activation_save_command_audio": True,

@@ -544,7 +544,7 @@ PYTHON=/path/to/python ./scripts/install_user_service.sh
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --smoke-test
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --list-devices
 ~/.hermes/hermes-agent/venv/bin/okay-hermes-voice --activation-summary ~/.hermes/wakeword/activations --summary-json
-~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/activation_archive.py src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
+~/.hermes/hermes-agent/venv/bin/python -m py_compile src/okay_hermes_voice/activation_archive/__init__.py src/okay_hermes_voice/wakeword_daemon.py src/okay_hermes_voice/voice_activation_popup.py
 PYTHONPATH=src ~/.hermes/hermes-agent/venv/bin/python -m pytest -q
 ```
 

@@ -1,8 +1,6 @@
 """Voice command routing, acknowledgements, and response dispatch facade."""
 from __future__ import annotations
 
-from tools.tts_tool import text_to_speech_tool
-
 from ..hermes_runtime import ask_hermes_turn
 from ..interaction_router import (
     ACK_TEXT,
@@ -27,6 +25,13 @@ from .request_route import route_transcribed_request
 from .router_config import interaction_router_config_from_daemon_config
 from .status import interaction_ack_text, routed_request_status_message
 
+
+def text_to_speech_tool(text: str) -> str:
+    """Resolve Hermes TTS lazily so importing voice routing does not require Hermes tools."""
+    from tools.tts_tool import text_to_speech_tool as _text_to_speech_tool
+    return _text_to_speech_tool(text)
+
+
 __all__ = [
     "answer_routed_request",
     "command_recording_config_for_turn",
@@ -38,4 +43,5 @@ __all__ = [
     "play_interaction_ack",
     "route_transcribed_request",
     "routed_request_status_message",
+    "text_to_speech_tool",
 ]

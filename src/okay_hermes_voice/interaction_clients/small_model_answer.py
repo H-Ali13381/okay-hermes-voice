@@ -23,7 +23,7 @@ def answer_with_small_model(transcript: str, cfg: InteractionRouterConfig) -> Op
             messages=build_small_model_messages(transcript),
             temperature=0.2,
             max_tokens=300,
-            timeout=cfg.router_timeout_seconds,
+            timeout=cfg.small_model_timeout_seconds,
         )
     except TypeError as exc:
         if "timeout" not in str(exc):

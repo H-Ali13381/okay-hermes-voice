@@ -18,6 +18,7 @@ def test_interaction_router_config_from_daemon_config_maps_prefixed_keys():
             "interaction_router_provider": "deepseek",
             "interaction_router_model": "deepseek/deepseek-v4-flash",
             "interaction_router_timeout_seconds": 2.25,
+            "interaction_router_small_model_timeout_seconds": 4.5,
             "interaction_router_min_confidence": 0.8,
             "interaction_router_small_model_enabled": True,
             "interaction_router_ack_cache_enabled": False,
@@ -31,10 +32,33 @@ def test_interaction_router_config_from_daemon_config_maps_prefixed_keys():
     assert router_cfg.router_provider == "deepseek"
     assert router_cfg.router_model == "deepseek/deepseek-v4-flash"
     assert router_cfg.router_timeout_seconds == 2.25
+    assert router_cfg.small_model_timeout_seconds == 4.5
     assert router_cfg.router_min_confidence == 0.8
     assert router_cfg.small_model_enabled is True
     assert router_cfg.ack_cache_enabled is False
     assert router_cfg.ack_cache_dir == "~/tmp/acks"
+
+def test_default_config_routes_simple_safe_requests_to_small_model(monkeypatch):
+    def fake_plan_voice_request(transcript, cfg):
+        assert cfg.small_model_enabled is True
+        decision = router.RouterDecision(
+            request_complexity=router.RequestComplexity.SIMPLE,
+            route_target=router.RouteTarget.SMALL_MODEL,
+            ack_template_id=router.AckTemplate.NONE,
+            tool_risk=router.ToolRisk.NONE,
+            confidence=0.95,
+        )
+        route = router.choose_voice_route(transcript, decision, cfg)
+        return router.VoiceRequestPlan(transcript, decision, route)
+
+    monkeypatch.setattr(routing, "plan_voice_request", fake_plan_voice_request)
+
+    plan = routing.plan_interaction_route(dict(wake.DEFAULT_CONFIG), "tell me a fun fact")
+
+    assert plan is not None
+    assert plan.route.target is router.RouteTarget.SMALL_MODEL
+    assert plan.route.reason == "router_small_model"
+
 
 def test_plan_interaction_route_returns_none_when_disabled(monkeypatch):
     called = False
@@ -107,6 +131,34 @@ def test_route_transcribed_request_plays_immediate_ack(monkeypatch):
     assert played == [(wake.AckTemplate.CHECKING, False)]
 
 
+def test_route_transcribed_request_schedules_provisional_ack_before_planning(monkeypatch):
+    decision = router.RouterDecision(confidence=0.9)
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.CHECKING,
+        "router_heavy_agent",
+    )
+    plan = wake.VoiceRequestPlan("inspect the repo", decision, route)
+    events = []
+
+    def fake_plan_interaction_route(_cfg, _transcript):
+        events.append("plan_start")
+        assert events == [("ack", wake.AckTemplate.GOT_IT, False, True), "plan_start"]
+        return plan
+
+    monkeypatch.setattr(routing, "plan_interaction_route", fake_plan_interaction_route)
+    monkeypatch.setattr(
+        routing,
+        "play_interaction_ack",
+        lambda cfg, template, **kwargs: events.append(
+            (template and "ack", template, kwargs.get("block"), kwargs.get("loop_until_cancelled"))
+        ) or True,
+    )
+
+    assert routing.route_transcribed_request({}, "inspect the repo", loop_ack_until_cancelled=True) is plan
+    assert events == [("ack", wake.AckTemplate.GOT_IT, False, True), "plan_start"]
+
+
 def test_route_transcribed_request_can_schedule_looping_ack(monkeypatch):
     decision = router.RouterDecision(confidence=0.9)
     route = router.VoiceRoute(
@@ -127,7 +179,7 @@ def test_route_transcribed_request_can_schedule_looping_ack(monkeypatch):
     )
 
     assert routing.route_transcribed_request({}, "inspect the repo", loop_ack_until_cancelled=True) is plan
-    assert played == [(wake.AckTemplate.CHECKING, False, True)]
+    assert played == [(wake.AckTemplate.GOT_IT, False, True)]
 
 
 def test_play_interaction_ack_repeats_until_cancelled(monkeypatch):
@@ -219,6 +271,27 @@ def test_route_transcribed_request_skips_none_ack(monkeypatch):
 
     assert routing.route_transcribed_request({}, "close") is plan
 
+def test_answer_routed_request_immediate_only_bypasses_heavy_hermes_call(monkeypatch):
+    route = router.VoiceRoute(
+        wake.RouteTarget.IMMEDIATE_ONLY,
+        wake.AckTemplate.NONE,
+        "router_immediate_only",
+    )
+    plan = wake.VoiceRequestPlan("close voice mode", router.RouterDecision(confidence=1.0), route)
+    history = [{"role": "user", "content": "prior"}]
+    monkeypatch.setattr(
+        routing,
+        "ask_hermes_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("heavy agent should not run")),
+    )
+
+    response, returned_history, source = routing.answer_routed_request({}, "close voice mode", plan, history)
+
+    assert response is None
+    assert returned_history == history
+    assert source == "immediate_only"
+
+
 def test_answer_routed_request_uses_small_model_and_updates_history(monkeypatch):
     route = router.VoiceRoute(
         wake.RouteTarget.SMALL_MODEL,
@@ -226,7 +299,15 @@ def test_answer_routed_request_uses_small_model_and_updates_history(monkeypatch)
         "router_small_model",
     )
     plan = wake.VoiceRequestPlan("tell me a tiny fact", router.RouterDecision(confidence=0.95), route)
-    monkeypatch.setattr(routing, "answer_with_small_model", lambda transcript, cfg: "Tiny answer.")
+    seen = {}
+
+    def fake_answer_with_small_model(transcript, cfg):
+        seen["transcript"] = transcript
+        seen["provider"] = cfg.small_model_provider
+        seen["model"] = cfg.small_model_model
+        return "Tiny answer."
+
+    monkeypatch.setattr(routing, "answer_with_small_model", fake_answer_with_small_model)
     monkeypatch.setattr(
         routing,
         "ask_hermes_turn",
@@ -237,6 +318,11 @@ def test_answer_routed_request_uses_small_model_and_updates_history(monkeypatch)
 
     assert response == "Tiny answer."
     assert source == "small_model"
+    assert seen == {
+        "transcript": "tell me a tiny fact",
+        "provider": "openrouter",
+        "model": "google/gemini-2.5-flash-lite",
+    }
     assert history[-2:] == [
         {"role": "user", "content": "tell me a tiny fact"},
         {"role": "assistant", "content": "Tiny answer."},
