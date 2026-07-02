@@ -34,9 +34,28 @@ def answer_routed_request(
             ])
             return response, history, "small_model"
         LOG.info("Small-model route produced no response; falling back to heavy Hermes")
+    if plan and plan.route.target is RouteTarget.HEAVY_AGENT and cfg.get("heavy_agent_delegation_enabled", False):
+        from . import dispatch_heavy_agent_delegation
+        delegation_id = dispatch_heavy_agent_delegation(cfg, transcript, history)
+        if delegation_id:
+            response = _delegation_ack_text(cfg, delegation_id)
+            history.extend([
+                {"role": "user", "content": transcript},
+                {"role": "assistant", "content": response},
+            ])
+            return response, history, "heavy_agent_delegation"
+        LOG.info("Heavy-agent delegation unavailable; falling back to inline heavy Hermes")
     from . import ask_hermes_turn
     response, history = ask_hermes_turn(cfg, transcript, history, cancel_check=cancel_check)
     return response, history, "heavy_agent"
+
+
+def _delegation_ack_text(cfg: Dict[str, Any], delegation_id: str) -> str:
+    template = str(
+        cfg.get("heavy_agent_delegation_ack")
+        or "I’m working on it in the background. You can keep talking while the heavy agent runs. Task: {delegation_id}"
+    )
+    return template.format(delegation_id=delegation_id)
 
 
 __all__ = ["answer_routed_request"]

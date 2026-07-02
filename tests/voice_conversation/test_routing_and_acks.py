@@ -342,3 +342,81 @@ def test_answer_routed_request_falls_back_to_heavy_agent(monkeypatch):
     assert response == "Heavy answer."
     assert source == "heavy_agent"
     assert history == [{"role": "assistant", "content": "Heavy answer."}]
+
+
+def test_command_recording_config_uses_poll_timeout_while_heavy_delegation_pending():
+    cfg = {
+        "conversation_mode_enabled": True,
+        "conversation_followup_start_timeout_seconds": 0.0,
+        "heavy_agent_delegation_followup_start_timeout_seconds": 1.25,
+        "_heavy_agent_delegation_pending": True,
+    }
+
+    turn_cfg = routing.command_recording_config_for_turn(cfg, 2)
+
+    assert turn_cfg["speech_start_timeout_seconds"] == 1.25
+
+
+def test_answer_routed_request_dispatches_heavy_agent_delegation(monkeypatch):
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.CHECKING,
+        "router_heavy_agent",
+    )
+    plan = wake.VoiceRequestPlan("debug the repo", router.RouterDecision(confidence=0.95), route)
+    dispatched = {}
+
+    def fake_dispatch(cfg, transcript, history):
+        dispatched["cfg"] = cfg
+        dispatched["transcript"] = transcript
+        dispatched["history"] = list(history)
+        return "deleg_123"
+
+    monkeypatch.setattr(routing, "dispatch_heavy_agent_delegation", fake_dispatch)
+    monkeypatch.setattr(
+        routing,
+        "ask_hermes_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("heavy agent should not block inline")),
+    )
+
+    response, history, source = routing.answer_routed_request(
+        {"heavy_agent_delegation_enabled": True},
+        "debug the repo",
+        plan,
+        [{"role": "user", "content": "prior"}],
+    )
+
+    assert source == "heavy_agent_delegation"
+    assert isinstance(response, str)
+    assert "working" in response.lower()
+    assert "deleg_123" in response
+    assert dispatched["transcript"] == "debug the repo"
+    assert dispatched["history"] == [{"role": "user", "content": "prior"}]
+    assert history[-2:] == [
+        {"role": "user", "content": "debug the repo"},
+        {"role": "assistant", "content": response},
+    ]
+
+
+def test_answer_routed_request_falls_back_when_delegation_rejected(monkeypatch):
+    route = router.VoiceRoute(
+        wake.RouteTarget.HEAVY_AGENT,
+        wake.AckTemplate.CHECKING,
+        "router_heavy_agent",
+    )
+    plan = wake.VoiceRequestPlan("debug the repo", router.RouterDecision(confidence=0.95), route)
+
+    monkeypatch.setattr(routing, "dispatch_heavy_agent_delegation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        routing,
+        "ask_hermes_turn",
+        lambda cfg, transcript, history, **_kwargs: ("Heavy answer.", [*history, {"role": "assistant", "content": "Heavy answer."}]),
+    )
+
+    response, history, source = routing.answer_routed_request(
+        {"heavy_agent_delegation_enabled": True}, "debug the repo", plan, []
+    )
+
+    assert response == "Heavy answer."
+    assert source == "heavy_agent"
+    assert history == [{"role": "assistant", "content": "Heavy answer."}]

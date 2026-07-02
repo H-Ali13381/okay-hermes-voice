@@ -18,6 +18,13 @@ from .ack_playback import play_interaction_ack
 from .ack_playback_sync import _play_interaction_ack_sync
 from .answer import answer_routed_request
 from .close_detection import is_close_transcript
+from .heavy_delegation import (
+    cancel_pending_heavy_delegations,
+    dispatch_heavy_agent_delegation,
+    has_pending_heavy_delegation,
+    heavy_agent_delegation_enabled,
+    pop_completed_heavy_delegation,
+)
 from .normalization import normalize_voice_command
 from .planning import plan_interaction_route
 from .recording_config import command_recording_config_for_turn
@@ -34,13 +41,18 @@ def text_to_speech_tool(text: str) -> str:
 
 __all__ = [
     "answer_routed_request",
+    "cancel_pending_heavy_delegations",
     "command_recording_config_for_turn",
+    "dispatch_heavy_agent_delegation",
+    "has_pending_heavy_delegation",
+    "heavy_agent_delegation_enabled",
     "interaction_ack_text",
     "interaction_router_config_from_daemon_config",
     "is_close_transcript",
     "normalize_voice_command",
     "plan_interaction_route",
     "play_interaction_ack",
+    "pop_completed_heavy_delegation",
     "route_transcribed_request",
     "routed_request_status_message",
     "text_to_speech_tool",

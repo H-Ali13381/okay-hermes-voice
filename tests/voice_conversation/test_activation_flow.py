@@ -502,3 +502,60 @@ def test_handle_activation_records_phase_zero_timing_in_popup_and_archive(tmp_pa
     assert metadata["latest_turn_timing"] == timing
     assert metadata["turn_timings"] == [timing]
     assert metadata["turns"][0]["timings"] == timing
+
+
+def test_handle_activation_speaks_completed_heavy_delegation_before_followup_recording(monkeypatch, tmp_path):
+    from okay_hermes_voice.voice_routing.heavy_delegation import HeavyDelegationResult
+
+    state_path = tmp_path / "voice_state.json"
+    metadata_path = tmp_path / "activation.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+    events = []
+    stop = threading.Event()
+    polls = iter([None, HeavyDelegationResult("deleg_1", "Final heavy answer.", [{"role": "assistant", "content": "Final heavy answer."}])])
+
+    def fake_pop_completed():
+        events.append("poll")
+        return next(polls, None)
+
+    pending = iter([False, True])
+    monkeypatch.setattr("okay_hermes_voice.activation.flow.runner.pop_completed_heavy_delegation", fake_pop_completed)
+    monkeypatch.setattr("okay_hermes_voice.activation.flow.runner.has_pending_heavy_delegation", lambda: next(pending, True))
+
+    def fake_record_command(_cfg, *, cancel_check):
+        events.append(("record", _cfg.get("_heavy_agent_delegation_pending")))
+        assert cancel_check() is False
+        return command_path
+
+    def fake_answer_routed_request(_cfg, transcript, plan, history, *, cancel_check):
+        events.append("dispatch_ack")
+        return "I’m working on it in the background. Task: deleg_1", history, "heavy_agent_delegation"
+
+    spoken = []
+
+    def fake_speak_response(_cfg, text, *, cancel_check, stage_callback=None):
+        spoken.append(text)
+        if text == "Final heavy answer.":
+            stop.set()
+        return {"speak_seconds": 0.0}
+
+    services = _services(
+        save_activation_archive=lambda *_args, **_kwargs: {"metadata_path": str(metadata_path)},
+        launch_visualization=_launch_to_state(state_path),
+        record_command=fake_record_command,
+        transcribe_command=lambda *_args, **_kwargs: "debug the repo",
+        answer_routed_request=fake_answer_routed_request,
+        speak_response=fake_speak_response,
+        stop=stop,
+    )
+
+    result = _handle(services, {"conversation_mode_enabled": True}, {"probability": 0.9})
+
+    assert result == VOICE_SESSION_COMPLETED
+    assert spoken == ["I’m working on it in the background. Task: deleg_1", "Final heavy answer."]
+    assert events == ["poll", ("record", False), "dispatch_ack", "poll"]
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["latest_response"] == "Final heavy answer."
+    assert metadata["latest_response_source"] == "heavy_agent_delegation"

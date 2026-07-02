@@ -10,6 +10,7 @@ from .outcomes import TurnOutcomeHandler
 from .routing import RoutedTurnHandler
 from .session_setup import start_activation_session
 from .turn_input import TurnInputHandler
+from ...voice_routing import has_pending_heavy_delegation, pop_completed_heavy_delegation
 
 
 class ActivationFlowRunner:
@@ -60,6 +61,20 @@ class ActivationFlowRunner:
     def run(self) -> str:
         turn_index = 1
         while not self.deps.stop.is_set() and turn_index <= self.max_turns:
+            completed_delegation = pop_completed_heavy_delegation()
+            if completed_delegation is not None:
+                result, self.hermes_history, continue_conversation = self.routed_turns.speak_delegated_completion(
+                    turn_index,
+                    completed_delegation.response,
+                    completed_delegation.history,
+                    self.conversation_enabled,
+                )
+                if not continue_conversation:
+                    return result
+                turn_index += 1
+                continue
+
+            self.cfg["_heavy_agent_delegation_pending"] = has_pending_heavy_delegation()
             first_turn = turn_index == 1
             turn_started = self.deps.time.monotonic()
             turn_timing: Dict[str, Any] = {"turn": turn_index}

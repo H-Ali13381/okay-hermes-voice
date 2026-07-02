@@ -80,6 +80,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "interaction_router_small_model_timeout_seconds": 4.0,
     "interaction_router_ack_cache_enabled": True,
     "interaction_router_ack_cache_dir": str(HERMES_HOME / "wakeword" / "ack_cache"),
+    "heavy_agent_delegation_enabled": True,
+    "heavy_agent_delegation_provider": "",
+    "heavy_agent_delegation_model": "",
+    "heavy_agent_delegation_toolsets": None,
+    "heavy_agent_delegation_max_iterations": 90,
+    "heavy_agent_delegation_max_async_children": 1,
+    "heavy_agent_delegation_followup_start_timeout_seconds": 2.0,
+    "heavy_agent_delegation_ack": (
+        "I’m working on it in the background. You can keep talking while the heavy agent runs. "
+        "Task: {delegation_id}"
+    ),
     "tts_enabled": True,
     "max_spoken_response_chars": 2500,
     "playback_sink": "@DEFAULT_SINK@",

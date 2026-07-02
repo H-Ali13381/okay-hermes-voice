@@ -209,3 +209,86 @@ class RoutedTurnHandler:
             current_turn=turn_index + 1,
         )
         return VOICE_SESSION_COMPLETED, hermes_history, True
+
+    def speak_delegated_completion(
+        self,
+        turn_index: int,
+        response: str,
+        hermes_history: List[Dict[str, Any]],
+        conversation_enabled: bool,
+    ) -> tuple[str, List[Dict[str, Any]], bool]:
+        if not response:
+            return VOICE_SESSION_COMPLETED, hermes_history, conversation_enabled
+        self.deps.update_activation_archive_metadata(
+            self.activation_archive,
+            status="speaking",
+            latest_response=response,
+            latest_response_source="heavy_agent_delegation",
+            turns=self.archive_turns,
+            current_turn=turn_index,
+        )
+        self.archive_turns.append({
+            "turn": turn_index,
+            "transcript": "",
+            "response": response,
+            "response_source": "heavy_agent_delegation",
+        })
+        self.deps.append_visualization_turn(self.visual_state, transcript="", response=response)
+
+        def publish_speech_stage(stage: str) -> None:
+            message = (
+                "TTS: heavy agent finished; generating spoken audio…"
+                if stage == "tts"
+                else (
+                    "playback: playing the heavy-agent result; then I’ll keep listening…"
+                    if conversation_enabled
+                    else "playback: playing the heavy-agent result…"
+                )
+            )
+            publish_pipeline_stage(
+                self.deps,
+                self.visual_state,
+                stage,
+                message,
+                transcript="",
+                response=response,
+                error="",
+                current_turn=turn_index,
+            )
+
+        speak_result = self.deps.speak_response(
+            self.cfg,
+            response,
+            cancel_check=self.voice_cancel_requested,
+            stage_callback=publish_speech_stage,
+        )
+        if isinstance(speak_result, dict):
+            self.archive_turns[-1]["speak_result"] = dict(speak_result)
+        if self.stop_if_cancelled():
+            return VOICE_SESSION_CANCELLED, hermes_history, False
+        if not conversation_enabled:
+            self.deps.update_visualization_state(
+                self.visual_state,
+                status="done",
+                message="Heavy-agent response complete.",
+                response=response,
+                error="",
+            )
+            self.deps.update_activation_archive_metadata(
+                self.activation_archive,
+                status="completed",
+                close_reason="delegated_heavy_complete",
+                latest_response=response,
+                latest_response_source="heavy_agent_delegation",
+                turns=self.archive_turns,
+            )
+            return VOICE_SESSION_COMPLETED, hermes_history, False
+        self.deps.update_activation_archive_metadata(
+            self.activation_archive,
+            status="awaiting_followup",
+            latest_response=response,
+            latest_response_source="heavy_agent_delegation",
+            turns=self.archive_turns,
+            current_turn=turn_index + 1,
+        )
+        return VOICE_SESSION_COMPLETED, hermes_history, True

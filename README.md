@@ -442,6 +442,9 @@ Important config options in `~/.hermes/wakeword/config.yaml`:
 - `interaction_router_model`: fast structured router model, defaulting to Gemini Flash Lite.
 - `interaction_router_min_confidence`: below this, route conservatively to the full Hermes agent.
 - `interaction_router_small_model_enabled`: allow simple/safe requests to bypass the full agent.
+- `heavy_agent_delegation_enabled`: dispatch heavy/tool requests through Hermes' async delegation rail instead of blocking the voice loop inline.
+- `heavy_agent_delegation_provider` / `heavy_agent_delegation_model`: optional explicit heavy voice agent; blank inherits `hermes_provider` / `hermes_model` or normal Hermes config.
+- `heavy_agent_delegation_followup_start_timeout_seconds`: while a heavy delegation is running, follow-up listening uses this short timeout so the daemon can poll and speak the final result automatically.
 - `interaction_router_ack_cache_enabled`: cache short acknowledgement clips. The installer seeds a soft local loading-motif acknowledgement for the router ack templates, cached files preserve the TTS provider's audio extension, and acknowledgements loop asynchronously until Hermes/model answer generation finishes, before spoken response playback begins.
 - `beep_enabled`: play short local beeps for wake/listening/error feedback.
 - `stt_provider`: `hermes` keeps the normal Hermes STT stack; `nemotron_en_streaming` enables NVIDIA Nemotron English-only cache-aware streaming ASR; `parakeet_unified_streaming` enables NVIDIA Parakeet Unified English streaming ASR.

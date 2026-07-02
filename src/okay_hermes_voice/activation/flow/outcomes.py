@@ -31,6 +31,20 @@ class TurnOutcomeHandler:
         self.stop_if_cancelled = stop_if_cancelled
 
     def no_recording(self, turn_index: int, first_turn: bool, conversation_enabled: bool) -> str | None:
+        if self.cfg.get("_heavy_agent_delegation_pending", False) and conversation_enabled and not first_turn:
+            self.deps.update_visualization_state(
+                self.visual_state,
+                status="thinking",
+                message="The heavy agent is still working. I’m listening briefly for updates, then I’ll check again.",
+                error="",
+            )
+            self.deps.update_activation_archive_metadata(
+                self.activation_archive,
+                status="waiting_for_heavy_agent",
+                current_turn=turn_index,
+                turns=self.archive_turns,
+            )
+            return None
         if first_turn or not conversation_enabled:
             self.deps.update_visualization_state(
                 self.visual_state,

@@ -8,7 +8,12 @@ def command_recording_config_for_turn(cfg: Dict[str, Any], turn_index: int) -> D
     """Return per-turn recording config; follow-ups use a configurable start timeout; 0.0 means indefinite."""
     turn_cfg = dict(cfg)
     if turn_index > 1 and cfg.get("conversation_mode_enabled", True):
-        turn_cfg["speech_start_timeout_seconds"] = float(cfg.get("conversation_followup_start_timeout_seconds", 0.0) or 0.0)
+        if cfg.get("_heavy_agent_delegation_pending", False):
+            turn_cfg["speech_start_timeout_seconds"] = float(
+                cfg.get("heavy_agent_delegation_followup_start_timeout_seconds", 2.0) or 2.0
+            )
+        else:
+            turn_cfg["speech_start_timeout_seconds"] = float(cfg.get("conversation_followup_start_timeout_seconds", 0.0) or 0.0)
     return turn_cfg
 
 
