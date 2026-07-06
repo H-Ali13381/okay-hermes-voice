@@ -302,6 +302,41 @@ def test_popup_run_uses_alternate_screen_so_full_redraws_do_not_expand_scrollbac
     assert output.endswith("\033[?25h\033[?1049l")
 
 
+def test_popup_run_exits_when_final_keep_open_seconds_is_zero(monkeypatch, tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    final_state = {
+        "title": "Hermes Voice",
+        "status": "done",
+        "message": "Voice request complete.",
+        "activated_at": 1,
+        "updated_at": 2,
+        "keep_open_seconds": 0,
+    }
+
+    class CapturedStdout:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, text):
+            self.writes.append(text)
+            return len(text)
+
+        def flush(self):
+            pass
+
+    def fail_sleep(_seconds):
+        raise AssertionError("final state with keep_open_seconds=0 should exit without sleeping")
+
+    captured_stdout = CapturedStdout()
+    monkeypatch.setattr(popup_app, "load_state", lambda _path: final_state)
+    monkeypatch.setattr(popup_app.sys, "stdout", captured_stdout)
+    monkeypatch.setattr(popup_app.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(popup_app.time, "sleep", fail_sleep)
+
+    assert popup.run(state_path) == 0
+    assert "Voice request complete." in "".join(captured_stdout.writes)
+
+
 def test_popup_run_enables_mouse_capture_so_wheel_scroll_stays_inside_tui(monkeypatch, tmp_path):
     state_path = tmp_path / "voice_state.json"
     final_state = {

@@ -143,7 +143,8 @@ log_path: ~/.hermes/logs/okay-hermes-wakeword.log
 visualization_enabled: true
 visualization_terminal: auto
 visualization_title: Hermes Voice
-visualization_keep_open_seconds: 45.0
+visualization_keep_open_seconds: 3.0
+visualization_close_keep_open_seconds: 3.0
 visualization_launch_grace_seconds: 0.35
 # Omit visualization_script to use the installed package copy.
 

@@ -266,6 +266,38 @@ def test_handle_activation_honors_cancel_during_close_ack_playback(tmp_path):
     assert metadata["cancel_reason"] == "ctrl_c"
 
 
+def test_handle_activation_uses_short_terminal_timer_for_voice_close_command(tmp_path):
+    state_path = tmp_path / "voice_state.json"
+    command_path = tmp_path / "command.wav"
+    command_path.write_bytes(b"fake wav")
+
+    services = _services(
+        launch_visualization=_launch_to_state(state_path),
+        record_command=lambda *_args, **_kwargs: command_path,
+        transcribe_command=lambda *_args, **_kwargs: "close",
+        route_transcribed_request=_fail("close path should not route"),
+        answer_routed_request=_fail("close path should not answer"),
+        speak_response=lambda *_args, **_kwargs: {"tts_success": True, "playback_success": True, "speak_seconds": 0.1},
+    )
+
+    result = _handle(
+        services,
+        {
+            "conversation_mode_enabled": True,
+            "conversation_close_ack": "Closing voice mode.",
+            "conversation_close_phrases": ["close"],
+            "visualization_close_keep_open_seconds": 3.0,
+        },
+        {"probability": 0.9},
+    )
+
+    assert result == VOICE_SESSION_COMPLETED
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "done"
+    assert state["message"] == "Voice conversation closed."
+    assert state["keep_open_seconds"] == 3.0
+
+
 def test_handle_activation_transcript_only_mode_skips_route_answer_and_tts(tmp_path):
     state_path = tmp_path / "voice_state.json"
     metadata_path = tmp_path / "activation.json"

@@ -9,6 +9,16 @@ from .timing import elapsed_seconds, merge_speak_timing
 from .visualization import publish_pipeline_stage, publish_turn_timing
 
 
+def _close_keep_open_seconds(cfg: Dict[str, Any]) -> float:
+    raw = cfg.get("visualization_close_keep_open_seconds")
+    if raw is None or raw == "":
+        raw = cfg.get("visualization_keep_open_seconds", 3.0)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 3.0
+
+
 class TurnOutcomeHandler:
     def __init__(
         self,
@@ -219,6 +229,7 @@ class TurnOutcomeHandler:
             transcript=transcript,
             response=ack,
             error="",
+            keep_open_seconds=_close_keep_open_seconds(self.cfg),
         )
         self.deps.update_activation_archive_metadata(
             self.activation_archive,

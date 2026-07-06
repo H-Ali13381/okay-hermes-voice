@@ -19,6 +19,7 @@ from .constants import (
     SPINNER,
 )
 from .input import apply_scroll_key, read_keypress, write_terminal_control
+from .lifecycle import final_keep_open_seconds
 from .rendering import render_frame
 from .state import load_state, request_cancel, state_fingerprint
 
@@ -75,8 +76,8 @@ def run(path: Path) -> int:
             scroll_offset = clamped_scroll_offset
 
             if final_seen_at is not None:
-                keep_open = float(state.get("keep_open_seconds") or 45.0)
-                if keep_open > 0 and time.monotonic() - final_seen_at >= keep_open:
+                keep_open = final_keep_open_seconds(state)
+                if keep_open <= 0 or time.monotonic() - final_seen_at >= keep_open:
                     break
 
             tick += 1
